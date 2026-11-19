@@ -53,7 +53,10 @@ pub fn pretty_combo(combo: &str) -> String {
 }
 
 struct Daemon {
+    /// Effective settings: the config file plus command-line overrides.
     cfg: Config,
+    /// The config file as last read, to tell what a reload changed.
+    disk: Config,
     flags: Flags,
     source: VideoSource,
     ring: Arc<Mutex<Ring>>,
@@ -201,7 +204,10 @@ impl Daemon {
     }
 
     fn reload(&mut self) -> Result<()> {
-        let new = Config::load();
+        let disk = Config::load();
+        let mut new = self.cfg.clone();
+        new.apply_changes(&self.disk, &disk);
+        self.disk = disk;
         let restart = new.fps != self.cfg.fps
             || new.quality != self.cfg.quality
             || new.encoder != self.cfg.encoder
@@ -211,12 +217,10 @@ impl Daemon {
         }
         if new.hotkey != self.cfg.hotkey {
             eprintln!("hotkey change takes effect after a restart");
+            new.hotkey = self.cfg.hotkey.clone();
         }
         let _ = std::fs::create_dir_all(&new.output);
-        self.cfg = Config {
-            hotkey: self.cfg.hotkey.clone(),
-            ..new
-        };
+        self.cfg = new;
         self.auto_pause = self.auto_pause && self.cfg.pause_without_game;
         if restart {
             self.restart()?;
@@ -450,6 +454,7 @@ pub async fn run(cfg: Config, flags: Flags) -> Result<()> {
         warning: String::new(),
         hotkey_backend: "none",
         saving: Arc::new(AtomicBool::new(false)),
+        disk: Config::load(),
         cfg,
         flags,
     };

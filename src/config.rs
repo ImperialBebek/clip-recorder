@@ -143,6 +143,32 @@ impl Config {
     }
 }
 
+impl Config {
+    /// Applies the fields that differ between two versions of the file, so a
+    /// reload keeps command-line overrides for everything the user didn't touch.
+    pub fn apply_changes(&mut self, old: &Config, new: &Config) {
+        macro_rules! take {
+            ($($f:ident),*) => {$(
+                if old.$f != new.$f {
+                    self.$f = new.$f.clone();
+                }
+            )*};
+        }
+        take!(
+            duration,
+            fps,
+            quality,
+            encoder,
+            audio,
+            output,
+            hotkey,
+            pause_without_game,
+            toast,
+            sound
+        );
+    }
+}
+
 pub fn expand(p: &str) -> PathBuf {
     match p.strip_prefix("~/") {
         Some(rest) => crate::home().join(rest),
