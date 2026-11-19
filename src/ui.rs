@@ -110,9 +110,13 @@ fn thumb_dir() -> PathBuf {
         .join("clip-recorder/thumbs")
 }
 
+/// Keyed by the full path, so same-named clips in different folders differ.
 fn thumb_path(clip: &Path) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    clip.hash(&mut h);
     let name = clip.file_stem().unwrap_or_default().to_string_lossy();
-    thumb_dir().join(format!("{name}.png"))
+    thumb_dir().join(format!("{name}-{:016x}.png", h.finish()))
 }
 
 /// A cached thumbnail that is newer than its clip.
