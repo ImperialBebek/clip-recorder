@@ -507,10 +507,11 @@ pub async fn run(cfg: Config, flags: Flags) -> Result<()> {
                         answer(reply, Ok(String::new()));
                     }
                     "reselect" if !d.flags.test_source => {
-                        d.stop();
-                        drop(stream.take());
+                        // Keep recording the old screen until a new one is picked;
+                        // cancelling the picker changes nothing.
                         let r = match portal::open(true).await {
                             Ok(s) => {
+                                d.stop();
                                 stream = Some(s);
                                 d.source = source_of(&stream);
                                 d.sync_running().map(|_| String::new()).map_err(|e| format!("{e:#}"))
