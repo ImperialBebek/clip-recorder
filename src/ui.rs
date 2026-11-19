@@ -43,6 +43,14 @@ fn num(s: &Status, k: &str) -> u64 {
     get(s, k).parse().unwrap_or(0)
 }
 
+fn request_async(cmd: &'static str) {
+    std::thread::spawn(move || {
+        if let Err(e) = ipc::request(cmd) {
+            eprintln!("{cmd}: {e:#}");
+        }
+    });
+}
+
 const QUALITY: [Quality; 3] = [Quality::Light, Quality::High, Quality::Max];
 const DURATIONS: [u32; 3] = [30, 60, 120];
 const AUDIO_KBPS: u64 = 160;
@@ -336,7 +344,14 @@ pub fn library() -> Result<()> {
             change("duration", move |c| c.duration = secs);
         }
     });
-    ui.on_start_recorder(|| spawn_detached(&["run"]));
+    // Paused or idle: resume the running recorder; stopped: start one.
+    ui.on_start_recorder(|| {
+        if ipc::status().is_ok() {
+            request_async("resume");
+        } else {
+            spawn_detached(&["run"]);
+        }
+    });
     {
         let weak = ui.as_weak();
         ui.on_drag(move || {
