@@ -201,7 +201,11 @@ fn thumb_worker(ui: slint::Weak<Library>) -> std::sync::mpsc::Sender<PathBuf> {
 fn single_instance(ui: slint::Weak<Library>) -> Option<std::os::unix::net::UnixListener> {
     use std::os::linux::net::SocketAddrExt;
     use std::os::unix::net::{SocketAddr, UnixListener, UnixStream};
-    let addr = SocketAddr::from_abstract_name(b"clip-recorder-library").ok()?;
+    use std::os::unix::fs::MetadataExt;
+    // Abstract names are shared by every user on the machine; scope it to ours.
+    let uid = std::fs::metadata("/proc/self").map_or(0, |m| m.uid());
+    let name = format!("clip-recorder-library-{uid}");
+    let addr = SocketAddr::from_abstract_name(name.as_bytes()).ok()?;
     match UnixListener::bind_addr(&addr) {
         Ok(l) => {
             let listener = l.try_clone().ok()?;
