@@ -39,6 +39,7 @@ pub fn audio_candidates(want: AudioSource) -> &'static [AudioSource] {
         AudioSource::Auto => &[AudioSource::PipeWire, AudioSource::Pulse],
         AudioSource::PipeWire => &[AudioSource::PipeWire],
         AudioSource::Pulse => &[AudioSource::Pulse],
+        AudioSource::Test => &[AudioSource::Test],
         AudioSource::None => &[],
     }
 }
@@ -57,6 +58,7 @@ pub fn audio_element(src: AudioSource) -> Result<gst::Element> {
             ],
         ),
         AudioSource::Pulse => make("pulsesrc", &[("device", "@DEFAULT_MONITOR@"), ("do-timestamp", "true")]),
+        AudioSource::Test => make("audiotestsrc", &[("is-live", "true"), ("volume", "0.2")]),
         _ => bail!("no audio source"),
     }
 }

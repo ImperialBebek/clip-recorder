@@ -23,6 +23,8 @@ pub enum AudioSource {
     Auto,
     PipeWire,
     Pulse,
+    /// A sine tone, paired with `--test-source`.
+    Test,
     None,
 }
 
@@ -141,6 +143,7 @@ fn audio_name(src: AudioSource) -> &'static str {
     match src {
         AudioSource::PipeWire => "pipewire",
         AudioSource::Pulse => "pulse",
+        AudioSource::Test => "test",
         _ => "none",
     }
 }

@@ -157,11 +157,15 @@ async fn run(o: Options) -> Result<()> {
         o.duration.into(),
     ))));
     let (bus_tx, mut bus_rx) = mpsc::unbounded_channel();
+    let audio = match (o.test_source, o.audio) {
+        (true, AudioSource::Auto) => AudioSource::Test,
+        (_, a) => a,
+    };
     let settings = Settings {
         fps: o.fps,
         kbps: o.kbps,
         encoder: o.encoder,
-        audio: o.audio,
+        audio,
     };
     let mut recorder = Recorder::start(&source, &settings, ring.clone(), move |ev| {
         let _ = bus_tx.send(ev);
