@@ -256,7 +256,7 @@ fn start_save(
                     path.display()
                 );
                 if notify {
-                    let _ = std::process::Command::new("notify-send")
+                    let child = std::process::Command::new("notify-send")
                         .args([
                             "-a",
                             "clip-recorder",
@@ -268,6 +268,9 @@ fn start_save(
                         ])
                         .arg(path.display().to_string())
                         .spawn();
+                    if let Ok(mut child) = child {
+                        std::thread::spawn(move || child.wait());
+                    }
                 }
                 Ok(path.display().to_string())
             }
