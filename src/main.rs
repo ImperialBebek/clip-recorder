@@ -242,7 +242,7 @@ fn start_save(
         .and_then(|t| t.format("clip_%Y-%m-%d_%H-%M-%S.mp4"))
         .map(|s| s.to_string())
         .unwrap_or_else(|_| "clip.mp4".into());
-    let path = o.output.join(name);
+    let path = unique_path(&o.output, &name);
     let notify = o.notify;
     let saving = saving.clone();
     tokio::task::spawn_blocking(move || {
@@ -280,4 +280,17 @@ fn start_save(
             let _ = r.send(msg);
         }
     });
+}
+
+/// `dir/name`, or `dir/stem-2.ext`, `-3`... if that already exists, so two
+/// saves in the same second never overwrite each other.
+fn unique_path(dir: &std::path::Path, name: &str) -> PathBuf {
+    let (stem, ext) = name.rsplit_once('.').unwrap_or((name, ""));
+    let mut path = dir.join(name);
+    let mut n = 2;
+    while path.exists() {
+        path = dir.join(format!("{stem}-{n}.{ext}"));
+        n += 1;
+    }
+    path
 }
