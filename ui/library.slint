@@ -1,0 +1,255 @@
+import { Theme } from "theme.slint";
+import { Keys, LivePill, Icon, RecordMark } from "widgets.slint";
+
+export struct ClipCard {
+    title: string,
+    when: string,
+    length: string,
+    path: string,
+    thumb: image,
+}
+
+component Segmented inherits Rectangle {
+    in property <[string]> options;
+    in property <int> selected;
+    in property <bool> mono;
+    callback picked(int);
+    height: 32px;
+    border-radius: 8px;
+    background: Theme.sidebar;
+    border-width: 1px;
+    border-color: Theme.divider;
+    HorizontalLayout {
+        padding: 3px;
+        spacing: 2px;
+        alignment: start;
+        for o[i] in options: Rectangle {
+            width: label.preferred-width + 30px;
+            border-radius: 6px;
+            background: i == selected ? Theme.key-bg : ta.has-hover ? Theme.card : transparent;
+            border-width: i == selected ? 1px : 0;
+            border-color: Theme.key-border;
+            label := Text {
+                text: o;
+                font-family: mono ? Theme.mono-font : Theme.body-font;
+                font-size: 12px;
+                font-weight: i == selected ? 600 : 400;
+                color: i == selected ? Theme.text : Theme.muted;
+            }
+            ta := TouchArea { mouse-cursor: pointer; clicked => { root.picked(i); } }
+        }
+    }
+}
+
+component SettingRow inherits VerticalLayout {
+    in property <string> title;
+    in property <string> note;
+    spacing: 8px;
+    HorizontalLayout {
+        Text { text: title; font-family: Theme.body-font; font-size: 13px; font-weight: 600; color: Theme.text; horizontal-stretch: 1; }
+        Text { text: note; font-family: Theme.mono-font; font-size: 10px; color: Theme.muted; vertical-alignment: center; }
+    }
+    @children
+}
+
+component IconButton inherits Rectangle {
+    in property <string> icon;
+    in property <bool> active;
+    in property <bool> round;
+    callback clicked;
+    width: round ? 28px : 32px;
+    height: self.width;
+    border-radius: round ? self.width / 2 : 8px;
+    background: active || ta.has-hover ? Theme.card-hover : round ? Theme.key-bg : transparent;
+    Icon { name: icon; stroke: Theme.text; width: round ? 14px : 16px; height: self.width; }
+    ta := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+component Card inherits Rectangle {
+    in property <ClipCard> item;
+    callback open();
+    property <length> thumb-height: self.width * 9 / 16;
+    height: thumb-height + 34px;
+    Rectangle {
+        y: 0;
+        height: thumb-height;
+        border-radius: 8px;
+        clip: true;
+        background: Theme.card;
+        Image { width: 100%; height: 100%; source: item.thumb; image-fit: cover; }
+        if ta.has-hover: Rectangle { background: #ffffff10; }
+        Rectangle {
+            x: parent.width - self.width - 8px;
+            y: parent.height - self.height - 8px;
+            width: len.preferred-width + 12px;
+            height: 20px;
+            border-radius: 4px;
+            background: #0e0f11d0;
+            len := Text { text: item.length; font-family: Theme.mono-font; font-size: 11px; font-weight: 500; color: Theme.text; }
+        }
+    }
+    HorizontalLayout {
+        y: thumb-height + 10px;
+        height: 18px;
+        padding-left: 2px;
+        padding-right: 2px;
+        spacing: 8px;
+        Text { text: item.title; overflow: elide; font-family: Theme.body-font; font-size: 13px; font-weight: 600; color: Theme.text; vertical-alignment: center; horizontal-stretch: 1; }
+        Text { text: item.when; font-family: Theme.mono-font; font-size: 11px; color: Theme.muted; vertical-alignment: center; }
+    }
+    ta := TouchArea { mouse-cursor: pointer; clicked => { root.open(); } }
+}
+
+export component Library inherits Window {
+    in property <[ClipCard]> clips;
+    in property <bool> live;
+    in property <string> state-label: "Stopped";
+    in property <string> folder-text;
+    in property <[string]> hotkey: ["Alt", "S"];
+    in property <int> seconds: 60;
+    in property <int> quality: 1;
+    in property <int> duration: 1;
+    in property <string> quality-note;
+    in property <string> duration-note;
+    in-out property <bool> popover;
+    callback open-clip(string);
+    callback set-quality(int);
+    callback set-duration(int);
+    callback start-recorder();
+    callback drag();
+    callback close-window();
+
+    title: "Clips";
+    preferred-width: 960px;
+    preferred-height: 640px;
+    min-width: 420px;
+    min-height: 360px;
+    no-frame: true;
+    background: Theme.bg;
+
+    fs := FocusScope {
+        key-pressed(e) => {
+            if e.text == Key.Escape {
+                if popover { popover = false; } else { root.close-window(); }
+                return accept;
+            }
+            reject
+        }
+
+        VerticalLayout {
+            // Header doubles as the title bar.
+            Rectangle {
+                height: 52px;
+                TouchArea { pointer-event(e) => { if e.kind == PointerEventKind.down && e.button == PointerEventButton.left { root.drag(); } } }
+                HorizontalLayout {
+                    padding-left: 20px;
+                    padding-right: 12px;
+                    spacing: 12px;
+                    RecordMark { size: 16px; y: (parent.height - 16px) / 2; }
+                    Text { text: "Clips"; font-family: Theme.body-font; font-size: 16px; font-weight: 600; color: Theme.text; vertical-alignment: center; horizontal-stretch: 1; }
+                    LivePill {
+                        y: (parent.height - self.height) / 2;
+                        live: root.live;
+                        label: root.state-label;
+                        TouchArea { mouse-cursor: root.live ? default : pointer; clicked => { if !root.live { root.start-recorder(); } } }
+                    }
+                    IconButton { y: (parent.height - self.height) / 2; icon: "sliders"; active: root.popover; clicked => { root.popover = !root.popover; } }
+                    Rectangle { width: 1px; height: 20px; y: (parent.height - 20px) / 2; background: Theme.border; }
+                    IconButton { y: (parent.height - self.height) / 2; icon: "close"; round: true; clicked => { root.close-window(); } }
+                }
+            }
+            Rectangle { height: 1px; background: Theme.divider; }
+
+            if clips.length == 0: Rectangle {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 14px;
+                    HorizontalLayout { alignment: center; Keys { keys: root.hotkey; } }
+                    Text { text: "No clips yet"; horizontal-alignment: center; font-family: Theme.display-font; font-size: 30px; font-weight: 500; color: Theme.text; }
+                    Text {
+                        text: "Already recording in the background. Play something,\nthen press \{root.hotkey[0]}+\{root.hotkey[1]} to keep the last \{root.seconds} seconds.";
+                        horizontal-alignment: center;
+                        font-family: Theme.body-font;
+                        font-size: 13px;
+                        color: Theme.muted;
+                    }
+                }
+            }
+
+            if clips.length > 0: VerticalLayout {
+                vertical-stretch: 1;
+                HorizontalLayout {
+                    padding-left: 24px;
+                    padding-right: 24px;
+                    padding-top: 20px;
+                    padding-bottom: 12px;
+                    Text { text: clips.length == 1 ? "1 clip" : "\{clips.length} clips"; font-family: Theme.body-font; font-size: 12px; font-weight: 600; color: Theme.text; horizontal-stretch: 1; }
+                    Text { text: root.folder-text; font-family: Theme.mono-font; font-size: 10px; color: Theme.faint; vertical-alignment: center; }
+                }
+                Flickable {
+                    property <length> gap: 16px;
+                    property <int> cols: max(1, floor((self.width - 48px + gap) / (260px + gap)));
+                    property <length> card-width: (self.width - 48px - (cols - 1) * gap) / cols;
+                    property <length> card-height: card-width * 9 / 16 + 34px;
+                    content-height: ceil(clips.length / cols) * (card-height + gap) + 8px;
+                    for c[i] in clips: Card {
+                        x: 24px + mod(i, cols) * (card-width + gap);
+                        y: floor(i / cols) * (card-height + gap);
+                        width: card-width;
+                        item: c;
+                        open => { root.open-clip(c.path); }
+                    }
+                }
+            }
+
+            Rectangle { height: 1px; background: Theme.divider; }
+            HorizontalLayout {
+                height: 44px;
+                alignment: center;
+                spacing: 6px;
+                Text { text: "Press"; font-family: Theme.body-font; font-size: 12px; color: Theme.muted; vertical-alignment: center; }
+                Keys { keys: root.hotkey; padding-top: 12px; padding-bottom: 12px; }
+                Text { text: "in any game to save the last \{root.seconds} s"; font-family: Theme.body-font; font-size: 12px; color: Theme.muted; vertical-alignment: center; }
+            }
+        }
+
+        if popover: TouchArea { clicked => { root.popover = false; } }
+        if popover: Rectangle {
+            x: parent.width - self.width - 52px;
+            y: 48px;
+            width: 300px;
+            height: pop.preferred-height;
+            background: Theme.card;
+            border-radius: 12px;
+            border-width: 1px;
+            border-color: Theme.border;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000080;
+            TouchArea { }
+            pop := VerticalLayout {
+                padding: 16px;
+                spacing: 16px;
+                SettingRow {
+                    title: "Quality";
+                    note: root.quality-note;
+                    Segmented { options: ["Light", "High", "Max"]; selected: root.quality; picked(i) => { root.set-quality(i); } }
+                }
+                SettingRow {
+                    title: "Duration";
+                    note: root.duration-note;
+                    Segmented { mono: true; options: ["30 s", "60 s", "120 s"]; selected: root.duration; picked(i) => { root.set-duration(i); } }
+                }
+                Rectangle { height: 1px; background: Theme.divider; }
+                Text {
+                    text: "Applies instantly. Encoder and folder are picked for you.";
+                    wrap: word-wrap;
+                    font-family: Theme.body-font;
+                    font-size: 11px;
+                    color: Theme.faint;
+                }
+            }
+        }
+    }
+    init => { fs.focus(); }
+}

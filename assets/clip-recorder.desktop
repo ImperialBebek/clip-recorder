@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Clip Recorder
+Comment=Keep the last minute of your screen and save it with Alt+S
+Exec=clip-recorder
+Icon=media-record
+Categories=AudioVideo;Recorder;Game;
+StartupNotify=false
+X-GNOME-Autostart-enabled=true

@@ -1,0 +1,143 @@
+import { Theme } from "theme.slint";
+
+export component Keycap inherits Rectangle {
+    in property <string> label;
+    height: 20px;
+    width: max(20px, t.preferred-width + 12px);
+    border-radius: 4px;
+    background: Theme.key-bg;
+    border-width: 1px;
+    border-color: Theme.key-border;
+    t := Text {
+        text: label;
+        font-family: Theme.mono-font;
+        font-size: 11px;
+        font-weight: 500;
+        color: Theme.text;
+    }
+}
+
+export component Keys inherits HorizontalLayout {
+    in property <[string]> keys;
+    spacing: 4px;
+    for k in keys: Keycap { label: k; }
+}
+
+export component LivePill inherits Rectangle {
+    in property <string> label: "Live";
+    in property <bool> live: true;
+    height: 22px;
+    width: row.preferred-width + 20px;
+    border-radius: 11px;
+    background: live ? Theme.red-dim : Theme.card-hover;
+    row := HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 6px;
+        alignment: center;
+        Rectangle {
+            y: (parent.height - 6px) / 2;
+            width: 6px;
+            height: 6px;
+            border-radius: 3px;
+            background: live ? Theme.red : Theme.muted;
+        }
+        Text {
+            text: label;
+            vertical-alignment: center;
+            font-family: Theme.body-font;
+            font-size: 11px;
+            font-weight: 600;
+            color: live ? Theme.red : Theme.muted;
+        }
+    }
+}
+
+// Thin bars, filled red up to `fill`, with a white playhead at the fill edge.
+export component BufferBars inherits Rectangle {
+    in property <float> fill;
+    in property <int> count: 60;
+    height: 16px;
+    border-radius: 3px;
+    background: #1a1b1e;
+    for i in count: Rectangle {
+        x: 4px + i * ((root.width - 8px) / count);
+        y: 3px;
+        width: 2px;
+        height: root.height - 6px;
+        border-radius: 1px;
+        background: (i + 1) / count <= fill ? Theme.red.with-alpha(0.35 + 0.65 * (i / count)) : #2a2b30;
+    }
+    if fill > 0: Rectangle {
+        x: 4px + clamp(fill, 0, 1) * (root.width - 8px) - 2px;
+        y: 1px;
+        width: 2px;
+        height: root.height - 2px;
+        background: white;
+    }
+}
+
+export component Toggle inherits Rectangle {
+    in-out property <bool> checked;
+    callback toggled(bool);
+    width: 36px;
+    height: 20px;
+    border-radius: 10px;
+    background: checked ? Theme.red : #2a2b30;
+    animate background { duration: 120ms; }
+    Rectangle {
+        x: checked ? parent.width - self.width - 2px : 2px;
+        y: 2px;
+        width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        background: white;
+        animate x { duration: 120ms; easing: ease-out; }
+    }
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            checked = !checked;
+            toggled(checked);
+        }
+    }
+}
+
+// Icons are drawn as outlines on a 16x16 grid.
+export component Icon inherits Path {
+    in property <string> name;
+    width: 16px;
+    height: 16px;
+    viewbox-width: 16;
+    viewbox-height: 16;
+    stroke: Theme.text;
+    stroke-width: 1.4px;
+    fill: transparent;
+    commands: name == "record" ? "M 8 1.5 A 6.5 6.5 0 1 1 7.99 1.5 Z M 8 5 A 3 3 0 1 1 7.99 5 Z"
+        : name == "pause" ? "M 5 3 L 5 13 M 11 3 L 11 13"
+        : name == "clip" ? "M 2 3.5 L 14 3.5 L 14 12.5 L 2 12.5 Z M 6.5 6 L 10 8 L 6.5 10 Z"
+        : name == "folder" ? "M 1.5 3.5 L 6 3.5 L 7.5 5 L 14.5 5 L 14.5 12.5 L 1.5 12.5 Z"
+        : name == "sliders" ? "M 2 4.5 L 14 4.5 M 2 11.5 L 14 11.5 M 10 2.5 L 10 6.5 M 5.5 9.5 L 5.5 13.5"
+        : name == "power" ? "M 5 3.8 A 5.6 5.6 0 1 0 11 3.8 M 8 1.5 L 8 7.5"
+        : name == "monitor" ? "M 1.5 2.5 L 14.5 2.5 L 14.5 11 L 1.5 11 Z M 5.5 14 L 10.5 14 M 8 11 L 8 14"
+        : name == "check" ? "M 4 8.5 L 7 11.5 L 12.5 5"
+        : name == "chevron" ? "M 4.5 6.5 L 8 10 L 11.5 6.5"
+        : name == "close" ? "M 4.5 4.5 L 11.5 11.5 M 11.5 4.5 L 4.5 11.5"
+        : "";
+}
+
+// The app mark: a ring with a red dot.
+export component RecordMark inherits Rectangle {
+    in property <length> size: 26px;
+    width: size;
+    height: size;
+    border-radius: size / 2;
+    border-width: size / 13;
+    border-color: Theme.text;
+    Rectangle {
+        width: size * 0.42;
+        height: size * 0.42;
+        border-radius: size * 0.21;
+        background: Theme.red;
+    }
+}

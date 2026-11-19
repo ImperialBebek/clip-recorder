@@ -1,0 +1,75 @@
+import { Theme } from "theme.slint";
+import { Icon } from "widgets.slint";
+
+// state: 0 saving, 1 saved, 2 failed
+export component Osd inherits Window {
+    in property <int> state;
+    in property <string> heading: "Saving clip…";
+    in property <string> detail;
+    // 0..1: indeterminate sweep while saving, remaining time once saved.
+    in property <float> progress;
+    callback dismiss();
+    callback open();
+
+    width: 320px;
+    height: 60px;
+    no-frame: true;
+    always-on-top: true;
+    background: transparent;
+    title: "Clip Recorder";
+
+    Rectangle {
+        background: #1a1b1e;
+        border-radius: 12px;
+        border-width: 1px;
+        border-color: Theme.border;
+        clip: true;
+        HorizontalLayout {
+            padding-left: 12px;
+            padding-right: 14px;
+            spacing: 12px;
+            alignment: start;
+            Rectangle {
+                y: (parent.height - 32px) / 2;
+                width: 32px;
+                height: 32px;
+                border-radius: 16px;
+                background: state == 1 ? Theme.red : state == 2 ? Theme.amber-dim : Theme.red-dim;
+                if state == 0: Path {
+                    width: 18px;
+                    height: 18px;
+                    viewbox-width: 18;
+                    viewbox-height: 18;
+                    stroke: Theme.red;
+                    stroke-width: 2px;
+                    // A 270° arc that spins with the animation clock.
+                    property <angle> a: (animation-tick() / 2.5ms) * 1deg;
+                    commands: "M " + (9 + 7 * cos(a)) + " " + (9 + 7 * sin(a))
+                        + " A 7 7 0 1 1 " + (9 + 7 * cos(a - 90deg)) + " " + (9 + 7 * sin(a - 90deg));
+                }
+                if state == 1: Icon { name: "check"; stroke: white; stroke-width: 2px; }
+                if state == 2: Text {
+                    text: "!";
+                    color: Theme.amber;
+                    font-family: Theme.body-font;
+                    font-weight: 600;
+                    font-size: 14px;
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                spacing: 2px;
+                Text { text: heading; font-family: Theme.body-font; font-weight: 600; font-size: 13px; color: Theme.text; }
+                Text { text: detail; font-family: Theme.mono-font; font-size: 11px; color: Theme.muted; }
+            }
+        }
+        Rectangle {
+            y: parent.height - 3px;
+            height: 3px;
+            x: 0;
+            width: (state == 2 ? 1 : progress) * parent.width;
+            background: state == 0 ? Theme.red : state == 2 ? Theme.amber : #4a4b50;
+        }
+        TouchArea { mouse-cursor: pointer; clicked => { if state == 1 { root.open(); } else { root.dismiss(); } } }
+    }
+}
