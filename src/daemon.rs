@@ -203,10 +203,10 @@ impl Daemon {
             .collect()
     }
 
-    fn reload(&mut self) -> Result<()> {
+    fn reload(&mut self, force: &[&str]) -> Result<()> {
         let disk = Config::load();
         let mut new = self.cfg.clone();
-        new.apply_changes(&self.disk, &disk);
+        new.apply_changes(&self.disk, &disk, force);
         self.disk = disk;
         let restart = new.fps != self.cfg.fps
             || new.quality != self.cfg.quality
@@ -511,8 +511,9 @@ pub async fn run(cfg: Config, flags: Flags) -> Result<()> {
                         let r = d.sync_running().map(|_| String::new()).map_err(|e| format!("{e:#}"));
                         answer(reply, r);
                     }
-                    "reload" => {
-                        let r = d.reload().map(|_| String::new()).map_err(|e| format!("{e:#}"));
+                    c if c == "reload" || c.starts_with("reload ") => {
+                        let force: Vec<&str> = c.split_whitespace().skip(1).collect();
+                        let r = d.reload(&force).map(|_| String::new()).map_err(|e| format!("{e:#}"));
                         answer(reply, r);
                     }
                     "open-folder" => {

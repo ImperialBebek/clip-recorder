@@ -146,10 +146,13 @@ impl Config {
 impl Config {
     /// Applies the fields that differ between two versions of the file, so a
     /// reload keeps command-line overrides for everything the user didn't touch.
-    pub fn apply_changes(&mut self, old: &Config, new: &Config) {
+    ///
+    /// `force` names keys to take from `new` even when unchanged, e.g. a key the
+    /// settings window just wrote back to the value already in the file.
+    pub fn apply_changes(&mut self, old: &Config, new: &Config, force: &[&str]) {
         macro_rules! take {
             ($($f:ident),*) => {$(
-                if old.$f != new.$f {
+                if old.$f != new.$f || force.contains(&stringify!($f)) {
                     self.$f = new.$f.clone();
                 }
             )*};

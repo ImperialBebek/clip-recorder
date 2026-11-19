@@ -85,8 +85,12 @@ pub fn request(cmd: &str) -> Result<String> {
 /// Sends `cmd` without waiting for the reply, for callers about to exit.
 pub fn send(cmd: &str) -> Result<()> {
     let path = socket_path();
-    let mut stream = std::os::unix::net::UnixStream::connect(&path)
-        .with_context(|| format!("clip-recorder is not running (no socket at {})", path.display()))?;
+    let mut stream = std::os::unix::net::UnixStream::connect(&path).with_context(|| {
+        format!(
+            "clip-recorder is not running (no socket at {})",
+            path.display()
+        )
+    })?;
     stream.write_all(format!("{cmd}\n").as_bytes())?;
     Ok(())
 }

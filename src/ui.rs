@@ -218,7 +218,7 @@ const AUDIO: [AudioSource; 4] = [
 const QUALITY: [Quality; 3] = [Quality::Light, Quality::High, Quality::Max];
 
 /// Writes one change to the config file and tells the recorder to reload it.
-fn change(f: impl FnOnce(&mut Config) + Send + 'static) {
+fn change(key: &'static str, f: impl FnOnce(&mut Config) + Send + 'static) {
     // One writer at a time, so two quick edits can't each save a stale copy.
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     std::thread::spawn(move || {
@@ -229,7 +229,7 @@ fn change(f: impl FnOnce(&mut Config) + Send + 'static) {
             eprintln!("{e:#}");
             return;
         }
-        let _ = ipc::request("reload");
+        let _ = ipc::request(&format!("reload {key}"));
     });
 }
 
@@ -413,25 +413,39 @@ pub fn settings() -> Result<()> {
     ui.on_reselect(|| request_async("reselect"));
     ui.on_start_recorder(|| spawn_detached(&["run"]));
     ui.on_set_length(|i| {
-        change(move |c| c.duration = LENGTHS.get(i as usize).copied().unwrap_or(c.duration))
+        change("duration", move |c| {
+            c.duration = LENGTHS.get(i as usize).copied().unwrap_or(c.duration)
+        })
     });
-    ui.on_set_fps(|i| change(move |c| c.fps = FPS.get(i as usize).copied().unwrap_or(c.fps)));
+    ui.on_set_fps(|i| {
+        change("fps", move |c| {
+            c.fps = FPS.get(i as usize).copied().unwrap_or(c.fps)
+        })
+    });
     ui.on_set_encoder(|i| {
-        change(move |c| c.encoder = ENCODERS.get(i as usize).copied().unwrap_or(c.encoder))
+        change("encoder", move |c| {
+            c.encoder = ENCODERS.get(i as usize).copied().unwrap_or(c.encoder)
+        })
     });
     ui.on_set_audio(|i| {
-        change(move |c| c.audio = AUDIO.get(i as usize).copied().unwrap_or(c.audio))
+        change("audio", move |c| {
+            c.audio = AUDIO.get(i as usize).copied().unwrap_or(c.audio)
+        })
     });
     ui.on_set_quality(|i| {
-        change(move |c| c.quality = QUALITY.get(i as usize).copied().unwrap_or(c.quality))
+        change("quality", move |c| {
+            c.quality = QUALITY.get(i as usize).copied().unwrap_or(c.quality)
+        })
     });
-    ui.on_set_pause_without_game(|v| change(move |c| c.pause_without_game = v));
-    ui.on_set_toast(|v| change(move |c| c.toast = v));
-    ui.on_set_sound(|v| change(move |c| c.sound = v));
+    ui.on_set_pause_without_game(|v| {
+        change("pause_without_game", move |c| c.pause_without_game = v)
+    });
+    ui.on_set_toast(|v| change("toast", move |c| c.toast = v));
+    ui.on_set_sound(|v| change("sound", move |c| c.sound = v));
     ui.on_choose_folder(|| {
         std::thread::spawn(|| {
             if let Some(dir) = choose_folder() {
-                change(move |c| c.output = dir);
+                change("output", move |c| c.output = dir);
             }
         });
     });
