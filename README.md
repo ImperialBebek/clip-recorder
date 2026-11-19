@@ -113,7 +113,7 @@ RAM use is roughly `bitrate × duration`: 25 Mbit/s for 60 s is about 190 MB. "P
 
 ### Fonts
 
-The UI uses Bricolage Grotesque for headings, Geist for body text and Geist Mono for numbers, keys and paths. All three are OFL and bundled into the binary from `assets/fonts`, so nothing needs to be installed.
+The UI uses Geist for headings and body text and Geist Mono for numbers, keys and paths. Both are OFL and bundled into the binary from `assets/fonts`, so nothing needs to be installed.
 
 ### Run as a systemd service
 
