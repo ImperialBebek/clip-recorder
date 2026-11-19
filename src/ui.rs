@@ -413,9 +413,11 @@ pub fn settings() -> Result<()> {
     ui.on_reselect(|| request_async("reselect"));
     ui.on_start_recorder(|| spawn_detached(&["run"]));
     ui.on_set_length(|i| {
-        change("duration", move |c| {
-            c.duration = LENGTHS.get(i as usize).copied().unwrap_or(c.duration)
-        })
+        // Past the presets is the current custom length (from --duration or the
+        // file); picking it again changes nothing.
+        if let Some(&secs) = LENGTHS.get(i as usize) {
+            change("duration", move |c| c.duration = secs);
+        }
     });
     ui.on_set_fps(|i| {
         change("fps", move |c| {
