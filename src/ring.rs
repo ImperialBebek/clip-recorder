@@ -125,6 +125,40 @@ impl Ring {
     pub fn bytes(&self) -> usize {
         self.video.bytes() + self.audio.bytes()
     }
+
+    pub fn window(&self) -> gst::ClockTime {
+        self.window
+    }
+
+    /// Takes effect on the next GOP boundary; no restart needed.
+    pub fn set_window(&mut self, window: gst::ClockTime) {
+        self.window = window;
+        if let Some(latest) = self.video.packets.back().and_then(|b| b.pts()) {
+            self.trim(latest);
+        }
+    }
+
+    /// Length of video currently held.
+    pub fn buffered(&self) -> gst::ClockTime {
+        let first = self.video.packets.front().and_then(|b| b.pts());
+        let last = self.video.packets.back().and_then(|b| b.pts());
+        match (first, last) {
+            (Some(a), Some(b)) => b.saturating_sub(a),
+            _ => gst::ClockTime::ZERO,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.video.packets.clear();
+        self.audio.packets.clear();
+    }
+
+    /// "1080p60" from the negotiated caps.
+    pub fn video_label(&self, fps: u32) -> Option<String> {
+        let caps = self.video.caps.as_ref()?;
+        let h = caps.structure(0)?.get::<i32>("height").ok()?;
+        Some(format!("{h}p{fps}"))
+    }
 }
 
 #[cfg(test)]

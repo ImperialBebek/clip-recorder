@@ -1,6 +1,8 @@
 pub mod hotkey;
 pub mod ipc;
 pub mod portal;
+pub mod shortcuts;
+pub mod tray;
 
 use std::path::PathBuf;
 

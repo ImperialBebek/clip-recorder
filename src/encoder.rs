@@ -39,6 +39,19 @@ impl Encoder {
         }
     }
 
+    /// How the UI names the encoder: "VA-API", "NVENC", "Software".
+    pub fn label(self) -> &'static str {
+        match self {
+            Encoder::Va | Encoder::Vaapi => "VA-API",
+            Encoder::Nvenc => "NVENC",
+            Encoder::X264 => "Software",
+        }
+    }
+
+    pub fn is_hardware(self) -> bool {
+        self != Encoder::X264
+    }
+
     pub fn available(self) -> bool {
         match self {
             Encoder::Va => has("vah264enc") || has("vah264lpenc"),

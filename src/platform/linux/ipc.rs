@@ -1,3 +1,7 @@
+//! Control socket at `$XDG_RUNTIME_DIR/clip-recorder.sock`: one command per
+//! connection, one reply. Used by `clip-recorder save`, the tray menu and the
+//! settings window, and bindable to any compositor shortcut.
+
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
@@ -8,6 +12,11 @@ use tokio::sync::{mpsc, oneshot};
 
 pub type Reply = oneshot::Sender<Result<String, String>>;
 
+pub struct Request {
+    pub cmd: String,
+    pub reply: Option<Reply>,
+}
+
 pub fn socket_path() -> PathBuf {
     let dir = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -15,9 +24,7 @@ pub fn socket_path() -> PathBuf {
     dir.join("clip-recorder.sock")
 }
 
-/// Accepts `save` commands from `clip-recorder save`, so the clip can also be
-/// bound to a compositor/DE shortcut instead of the built-in hotkey.
-pub fn serve(tx: mpsc::UnboundedSender<Option<Reply>>) -> Result<()> {
+pub fn serve(tx: mpsc::UnboundedSender<Request>) -> Result<()> {
     let path = socket_path();
     if std::os::unix::net::UnixStream::connect(&path).is_ok() {
         bail!("clip-recorder is already running ({})", path.display());
@@ -34,17 +41,15 @@ pub fn serve(tx: mpsc::UnboundedSender<Option<Reply>>) -> Result<()> {
                 if BufReader::new(read).read_line(&mut line).await.is_err() {
                     return;
                 }
-                let reply = match line.trim() {
-                    "save" => {
-                        let (rtx, rrx) = oneshot::channel();
-                        let _ = tx.send(Some(rtx));
-                        match rrx.await {
-                            Ok(Ok(path)) => format!("ok {path}\n"),
-                            Ok(Err(e)) => format!("error {e}\n"),
-                            Err(_) => "error recorder stopped\n".into(),
-                        }
-                    }
-                    other => format!("error unknown command '{other}'\n"),
+                let (rtx, rrx) = oneshot::channel();
+                let _ = tx.send(Request {
+                    cmd: line.trim().to_owned(),
+                    reply: Some(rtx),
+                });
+                let reply = match rrx.await {
+                    Ok(Ok(body)) => format!("ok {body}"),
+                    Ok(Err(e)) => format!("error {e}"),
+                    Err(_) => "error recorder stopped".into(),
                 };
                 let _ = write.write_all(reply.as_bytes()).await;
             });
@@ -53,7 +58,8 @@ pub fn serve(tx: mpsc::UnboundedSender<Option<Reply>>) -> Result<()> {
     Ok(())
 }
 
-pub fn send_save() -> Result<String> {
+/// Sends `cmd` to the running recorder and returns the body of an `ok` reply.
+pub fn request(cmd: &str) -> Result<String> {
     let path = socket_path();
     let mut stream = std::os::unix::net::UnixStream::connect(&path).with_context(|| {
         format!(
@@ -61,12 +67,26 @@ pub fn send_save() -> Result<String> {
             path.display()
         )
     })?;
-    stream.write_all(b"save\n")?;
+    stream.write_all(format!("{cmd}\n").as_bytes())?;
     let mut reply = String::new();
     stream.read_to_string(&mut reply)?;
-    match reply.trim().split_once(' ') {
-        Some(("ok", path)) => Ok(path.to_owned()),
-        Some(("error", e)) => bail!("{e}"),
-        _ => bail!("unexpected reply: {reply}"),
+    if reply.is_empty() && cmd == "quit" {
+        // The recorder can exit before the reply is flushed.
+        Ok(String::new())
+    } else if let Some(body) = reply.strip_prefix("ok") {
+        Ok(body.strip_prefix(' ').unwrap_or(body).to_owned())
+    } else if let Some(e) = reply.strip_prefix("error ") {
+        bail!("{e}")
+    } else {
+        bail!("unexpected reply: {reply}")
     }
+}
+
+/// `status` reply: `key=value` lines.
+pub fn status() -> Result<std::collections::HashMap<String, String>> {
+    Ok(request("status")?
+        .lines()
+        .filter_map(|l| l.split_once('='))
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect())
 }

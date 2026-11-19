@@ -29,6 +29,16 @@ pub enum AudioSource {
 }
 
 impl AudioSource {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::PipeWire => "pipewire",
+            Self::Pulse => "pulse",
+            Self::Test => "test",
+            Self::None => "none",
+        }
+    }
+
     pub fn parse(s: &str) -> Result<Self> {
         Ok(match s {
             "auto" => Self::Auto,

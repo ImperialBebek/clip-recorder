@@ -1,108 +1,113 @@
 mod capture;
+mod clips;
+mod config;
+mod daemon;
 mod encoder;
 mod gst_util;
 mod platform;
 mod ring;
 mod save;
+mod sysinfo;
+mod ui;
 
-use platform::{hotkey, ipc, portal};
-
-use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Context, Result};
-use gstreamer as gst;
-use tokio::signal::unix::{signal, SignalKind};
-use tokio::sync::mpsc;
 
-use capture::{AudioSource, BusEvent, Recorder, Settings, VideoSource};
+use capture::AudioSource;
+use config::Config;
 use encoder::Encoder;
-use ring::Ring;
+use platform::ipc;
 
 const USAGE: &str = "\
 clip-recorder: keeps the last few seconds of your screen in RAM, saves them on a hotkey
 
 USAGE:
-    clip-recorder [run] [OPTIONS]   start recording into the rolling buffer
+    clip-recorder [run] [OPTIONS]   start recording (tray icon, Alt+S to save)
     clip-recorder save              save a clip from the running recorder
+    clip-recorder pause|resume      pause or resume the buffer (pausing frees its RAM)
+    clip-recorder status            print the recorder's state
+    clip-recorder settings          open the settings window
+    clip-recorder menu              open the tray menu window
+    clip-recorder quit              stop the running recorder
 
-OPTIONS:
-    -d, --duration <SECS>     seconds kept in the buffer          [default: 30]
+OPTIONS (override ~/.config/clip-recorder/config for this run):
+    -d, --duration <SECS>     seconds kept in the buffer          [default: 60]
     -f, --fps <N>             frame rate cap                      [default: 60]
-    -b, --bitrate <KBPS>      video bitrate in kbit/s             [default: 20000]
+    -b, --bitrate <KBPS>      video bitrate, overrides the quality preset
     -e, --encoder <NAME>      auto, va, vaapi, nvenc, x264        [default: auto]
     -a, --audio <SOURCE>      auto, pipewire, pulse, none         [default: auto]
     -o, --output <DIR>        where clips go                      [default: ~/Videos/Clips]
     -k, --hotkey <COMBO>      global save hotkey                  [default: alt+s]
         --no-hotkey           only save via `clip-recorder save` or SIGUSR1
-        --no-notify           no desktop notification on save
+        --headless            no tray, first-run window or toasts
         --reselect            show the screen picker again
-        --test-source         record a test pattern instead of the screen
+        --test-source         record a test pattern and tone instead of the screen
     -h, --help                print this help
 ";
 
-struct Options {
-    duration: u32,
-    fps: u32,
-    kbps: u32,
-    encoder: Option<Encoder>,
-    audio: AudioSource,
-    output: PathBuf,
-    hotkey: Option<String>,
-    notify: bool,
-    reselect: bool,
-    test_source: bool,
-}
-
-enum Command {
-    Run(Options),
-    Save,
+enum Cmd {
+    Run(Config, daemon::Flags),
+    Client(&'static str),
+    Window(&'static str),
     Help,
 }
 
-fn parse_args() -> Result<Command> {
+fn parse_args() -> Result<Cmd> {
     use lexopt::prelude::*;
-    let mut o = Options {
-        duration: 30,
-        fps: 60,
-        kbps: 20_000,
-        encoder: None,
-        audio: AudioSource::Auto,
-        output: home().join("Videos").join("Clips"),
-        hotkey: Some("alt+s".into()),
-        notify: true,
+    let mut cfg = Config::load();
+    let mut flags = daemon::Flags {
+        kbps: None,
+        hotkey: true,
         reselect: false,
         test_source: false,
+        ui: true,
     };
     let mut parser = lexopt::Parser::from_env();
     let mut first = true;
     while let Some(arg) = parser.next()? {
         match arg {
-            Value(cmd) if first && cmd == "save" => return Ok(Command::Save),
-            Value(cmd) if first && cmd == "run" => {}
-            Short('d') | Long("duration") => o.duration = parser.value()?.parse()?,
-            Short('f') | Long("fps") => o.fps = parser.value()?.parse()?,
-            Short('b') | Long("bitrate") => o.kbps = parser.value()?.parse()?,
-            Short('e') | Long("encoder") => o.encoder = Encoder::parse(&parser.value()?.string()?)?,
-            Short('a') | Long("audio") => o.audio = AudioSource::parse(&parser.value()?.string()?)?,
-            Short('o') | Long("output") => o.output = parser.value()?.into(),
-            Short('k') | Long("hotkey") => o.hotkey = Some(parser.value()?.string()?),
-            Long("no-hotkey") => o.hotkey = None,
-            Long("no-notify") => o.notify = false,
-            Long("reselect") => o.reselect = true,
-            Long("test-source") => o.test_source = true,
-            Short('h') | Long("help") => return Ok(Command::Help),
+            Value(cmd) if first => {
+                let cmd = cmd.string()?;
+                match cmd.as_str() {
+                    "run" => {}
+                    "save" => return Ok(Cmd::Client("save")),
+                    "pause" => return Ok(Cmd::Client("pause")),
+                    "resume" => return Ok(Cmd::Client("resume")),
+                    "status" => return Ok(Cmd::Client("status")),
+                    "quit" => return Ok(Cmd::Client("quit")),
+                    "settings" => return Ok(Cmd::Window("settings")),
+                    "menu" => return Ok(Cmd::Window("menu")),
+                    "first-run" => return Ok(Cmd::Window("first-run")),
+                    "osd" => return Ok(Cmd::Window("osd")),
+                    _ => bail!("unknown command '{cmd}'"),
+                }
+            }
+            Short('d') | Long("duration") => cfg.duration = parser.value()?.parse()?,
+            Short('f') | Long("fps") => cfg.fps = parser.value()?.parse()?,
+            Short('b') | Long("bitrate") => flags.kbps = Some(parser.value()?.parse()?),
+            Short('e') | Long("encoder") => {
+                cfg.encoder = Encoder::parse(&parser.value()?.string()?)?
+            }
+            Short('a') | Long("audio") => {
+                cfg.audio = AudioSource::parse(&parser.value()?.string()?)?
+            }
+            Short('o') | Long("output") => cfg.output = parser.value()?.into(),
+            Short('k') | Long("hotkey") => cfg.hotkey = parser.value()?.string()?,
+            Long("no-hotkey") => flags.hotkey = false,
+            Long("headless") | Long("no-notify") => flags.ui = false,
+            Long("reselect") => flags.reselect = true,
+            Long("test-source") => flags.test_source = true,
+            Short('h') | Long("help") => return Ok(Cmd::Help),
             _ => return Err(arg.unexpected().into()),
         }
         first = false;
     }
-    if o.duration == 0 || o.fps == 0 || o.kbps == 0 {
+    if cfg.duration == 0 || cfg.fps == 0 || flags.kbps == Some(0) {
         bail!("duration, fps and bitrate must be greater than 0");
     }
-    Ok(Command::Run(o))
+    Ok(Cmd::Run(cfg, flags))
 }
 
 pub fn home() -> PathBuf {
@@ -111,15 +116,32 @@ pub fn home() -> PathBuf {
         .unwrap_or_else(|| "/tmp".into())
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     let result = match parse_args() {
-        Ok(Command::Help) => {
+        Ok(Cmd::Help) => {
             print!("{USAGE}");
             Ok(())
         }
-        Ok(Command::Save) => ipc::send_save().map(|path| println!("{path}")),
-        Ok(Command::Run(o)) => run(o).await,
+        Ok(Cmd::Client(cmd)) => ipc::request(cmd).map(|out| {
+            if !out.is_empty() {
+                println!("{}", out.trim_end());
+            }
+        }),
+        Ok(Cmd::Window(w)) => match w {
+            "first-run" => match ui::first_run() {
+                Ok(true) => Ok(()),
+                Ok(false) => return ExitCode::from(2),
+                Err(e) => Err(e),
+            },
+            "osd" => ui::osd(),
+            "menu" => ui::menu(),
+            _ => ui::settings(),
+        },
+        Ok(Cmd::Run(cfg, flags)) => tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(Into::into)
+            .and_then(|rt| rt.block_on(daemon::run(cfg, flags))),
         Err(e) => Err(e).context("try --help"),
     };
     match result {
@@ -129,175 +151,4 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-async fn run(o: Options) -> Result<()> {
-    gst::init()?;
-    std::fs::create_dir_all(&o.output)
-        .with_context(|| format!("cannot create {}", o.output.display()))?;
-
-    let (save_tx, mut save_rx) = mpsc::unbounded_channel::<Option<ipc::Reply>>();
-    ipc::serve(save_tx.clone())?;
-
-    // Held for the whole run: dropping it closes the portal session.
-    let portal = if o.test_source {
-        None
-    } else {
-        Some(portal::open(o.reselect).await?)
-    };
-    let source = match &portal {
-        Some(p) => VideoSource::Screen(platform::Screen {
-            fd: p.fd.as_raw_fd(),
-            node: p.node,
-        }),
-        None => VideoSource::Test,
-    };
-
-    let ring = Arc::new(Mutex::new(Ring::new(gst::ClockTime::from_seconds(
-        o.duration.into(),
-    ))));
-    let (bus_tx, mut bus_rx) = mpsc::unbounded_channel();
-    let audio = match (o.test_source, o.audio) {
-        (true, AudioSource::Auto) => AudioSource::Test,
-        (_, a) => a,
-    };
-    let settings = Settings {
-        fps: o.fps,
-        kbps: o.kbps,
-        encoder: o.encoder,
-        audio,
-    };
-    let mut recorder = Recorder::start(&source, &settings, ring.clone(), move |ev| {
-        let _ = bus_tx.send(ev);
-    })?;
-
-    let hotkey_label = match &o.hotkey {
-        Some(combo) => {
-            let tx = save_tx.clone();
-            let n = hotkey::spawn(hotkey::Hotkey::parse(combo)?, move || {
-                let _ = tx.send(None);
-            });
-            if n == 0 {
-                eprintln!(
-                    "hotkey: no readable keyboard in /dev/input; add yourself to the `input` group \
-                     (sudo usermod -aG input $USER, then log in again) or bind `clip-recorder save` \
-                     to a shortcut in your desktop"
-                );
-                "clip-recorder save".to_owned()
-            } else {
-                combo.to_owned()
-            }
-        }
-        None => "clip-recorder save".to_owned(),
-    };
-
-    eprintln!(
-        "recording: {}s buffer, {} fps cap, {} kbit/s, encoder {}, audio {}. press {} to save a clip to {}",
-        o.duration,
-        o.fps,
-        o.kbps,
-        recorder.encoder.name(),
-        recorder.audio_name.unwrap_or("off"),
-        hotkey_label,
-        o.output.display()
-    );
-
-    let mut usr1 = signal(SignalKind::user_defined1())?;
-    let mut term = signal(SignalKind::terminate())?;
-    let saving = Arc::new(AtomicBool::new(false));
-
-    let outcome = loop {
-        tokio::select! {
-            Some(reply) = save_rx.recv() => {
-                start_save(&ring, &o, &saving, reply);
-            }
-            _ = usr1.recv() => start_save(&ring, &o, &saving, None),
-            Some(ev) = bus_rx.recv() => match ev {
-                BusEvent::VideoFailed(e) => break Err(anyhow::anyhow!("video capture stopped: {e}")),
-                BusEvent::AudioFailed(e) => {
-                    eprintln!("audio capture stopped ({e}), continuing with video only");
-                    recorder.stop_audio();
-                }
-            },
-            _ = tokio::signal::ctrl_c() => break Ok(()),
-            _ = term.recv() => break Ok(()),
-        }
-    };
-    recorder.stop();
-    drop(portal);
-    let _ = std::fs::remove_file(ipc::socket_path());
-    outcome
-}
-
-fn start_save(
-    ring: &Arc<Mutex<Ring>>,
-    o: &Options,
-    saving: &Arc<AtomicBool>,
-    reply: Option<ipc::Reply>,
-) {
-    if saving.swap(true, Ordering::SeqCst) {
-        if let Some(r) = reply {
-            let _ = r.send(Err("a clip is already being saved".into()));
-        }
-        return;
-    }
-    let snap = ring.lock().unwrap().snapshot();
-    let name = gst::glib::DateTime::now_local()
-        .and_then(|t| t.format("clip_%Y-%m-%d_%H-%M-%S.mp4"))
-        .map(|s| s.to_string())
-        .unwrap_or_else(|_| "clip.mp4".into());
-    let path = unique_path(&o.output, &name);
-    let notify = o.notify;
-    let saving = saving.clone();
-    tokio::task::spawn_blocking(move || {
-        let result = save::write_mp4(snap, &path);
-        saving.store(false, Ordering::SeqCst);
-        let msg = match result {
-            Ok(len) => {
-                eprintln!(
-                    "saved {:.1}s clip: {}",
-                    len.mseconds() as f64 / 1000.0,
-                    path.display()
-                );
-                if notify {
-                    let child = std::process::Command::new("notify-send")
-                        .args([
-                            "-a",
-                            "clip-recorder",
-                            "-i",
-                            "video-x-generic",
-                            "-t",
-                            "3000",
-                            "Clip saved",
-                        ])
-                        .arg(path.display().to_string())
-                        .spawn();
-                    if let Ok(mut child) = child {
-                        std::thread::spawn(move || child.wait());
-                    }
-                }
-                Ok(path.display().to_string())
-            }
-            Err(e) => {
-                eprintln!("save failed: {e:#}");
-                Err(format!("{e:#}"))
-            }
-        };
-        if let Some(r) = reply {
-            let _ = r.send(msg);
-        }
-    });
-}
-
-/// `dir/name`, or `dir/stem-2.ext`, `-3`... if that already exists, so two
-/// saves in the same second never overwrite each other.
-fn unique_path(dir: &std::path::Path, name: &str) -> PathBuf {
-    let (stem, ext) = name.rsplit_once('.').unwrap_or((name, ""));
-    let mut path = dir.join(name);
-    let mut n = 2;
-    while path.exists() {
-        path = dir.join(format!("{stem}-{n}.{ext}"));
-        n += 1;
-    }
-    path
 }
