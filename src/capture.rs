@@ -155,7 +155,19 @@ fn appsink(
             gst_app::AppSinkCallbacks::builder()
                 .new_sample(move |sink| {
                     let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
-                    if let Some(buf) = sample.buffer_owned() {
+                    if let Some(mut buf) = sample.buffer_owned() {
+                        // Encoders may shift their output segment (x264enc adds
+                        // 1000 h); running time is what both pipelines share.
+                        if let Some(seg) = sample
+                            .segment()
+                            .and_then(|s| s.downcast_ref::<gst::ClockTime>())
+                        {
+                            let b = buf.make_mut();
+                            let pts = b.pts().and_then(|t| seg.to_running_time(t));
+                            let dts = b.dts().and_then(|t| seg.to_running_time(t));
+                            b.set_pts(pts);
+                            b.set_dts(dts);
+                        }
                         on_buffer(sample.caps_owned(), buf);
                         let _ = tx.try_send(());
                     }
