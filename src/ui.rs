@@ -219,7 +219,10 @@ const QUALITY: [Quality; 3] = [Quality::Light, Quality::High, Quality::Max];
 
 /// Writes one change to the config file and tells the recorder to reload it.
 fn change(f: impl FnOnce(&mut Config) + Send + 'static) {
+    // One writer at a time, so two quick edits can't each save a stale copy.
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     std::thread::spawn(move || {
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut c = Config::load();
         f(&mut c);
         if let Err(e) = c.save() {
