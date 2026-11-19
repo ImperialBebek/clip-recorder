@@ -61,6 +61,9 @@ struct Daemon {
     bus_tx: mpsc::UnboundedSender<BusEvent>,
     manual_pause: bool,
     auto_pause: bool,
+    /// Set when the user resumes while auto-paused; holds off auto-pause until
+    /// a game shows up and goes away again.
+    auto_override: bool,
     game: Option<String>,
     gpu: Option<String>,
     warning: String,
@@ -441,6 +444,7 @@ pub async fn run(cfg: Config, flags: Flags) -> Result<()> {
         bus_tx,
         manual_pause: false,
         auto_pause: false,
+        auto_override: false,
         game: None,
         gpu: sysinfo::gpu_name(),
         warning: String::new(),
@@ -493,10 +497,11 @@ pub async fn run(cfg: Config, flags: Flags) -> Result<()> {
                         d.manual_pause = match cmd.as_str() {
                             "pause" => true,
                             "resume" => false,
-                            _ => !d.manual_pause,
+                            _ => !d.paused(),
                         };
-                        if !d.manual_pause {
+                        if !d.manual_pause && d.auto_pause {
                             d.auto_pause = false;
+                            d.auto_override = true;
                         }
                         let r = d.sync_running().map(|_| String::new()).map_err(|e| format!("{e:#}"));
                         answer(reply, r);
@@ -546,7 +551,13 @@ pub async fn run(cfg: Config, flags: Flags) -> Result<()> {
             },
             _ = tick.tick() => {
                 d.game = sysinfo::running_game();
-                let idle = d.cfg.pause_without_game && !d.flags.test_source && d.game.is_none();
+                if d.game.is_some() {
+                    d.auto_override = false;
+                }
+                let idle = d.cfg.pause_without_game
+                    && !d.flags.test_source
+                    && !d.auto_override
+                    && d.game.is_none();
                 if idle != d.auto_pause {
                     d.auto_pause = idle;
                     if let Err(e) = d.sync_running() {
