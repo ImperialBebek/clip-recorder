@@ -9,6 +9,7 @@ pub struct Clip {
     pub path: PathBuf,
     pub title: String,
     pub seconds: Option<f64>,
+    pub modified: SystemTime,
 }
 
 /// `Elden Ring` + now -> `Elden_Ring_2026-11-19_1452.mp4`, unique in `dir`.
@@ -61,7 +62,8 @@ fn title_of(stem: &str) -> String {
     }
 }
 
-pub fn recent(dir: &Path, n: usize) -> Vec<Clip> {
+/// Every clip in `dir`, newest first.
+pub fn list(dir: &Path) -> Vec<Clip> {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -73,11 +75,11 @@ pub fn recent(dir: &Path, n: usize) -> Vec<Clip> {
     clips.sort_by(|a, b| b.0.cmp(&a.0));
     clips
         .into_iter()
-        .take(n)
-        .map(|(_, path)| Clip {
+        .map(|(modified, path)| Clip {
             title: title_of(&path.file_stem().unwrap_or_default().to_string_lossy()),
             seconds: mp4_seconds(&path),
             path,
+            modified,
         })
         .collect()
 }

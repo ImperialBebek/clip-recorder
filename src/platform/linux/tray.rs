@@ -1,6 +1,6 @@
 //! StatusNotifierItem tray icon (KDE, GNOME with the AppIndicator extension,
-//! waybar, ...). Left click opens the styled menu window; right click shows
-//! the same actions as a native menu for panels that only do dbusmenu.
+//! waybar, ...). Left click opens the library; the menu has Save clip, Open
+//! library and Quit.
 
 use ksni::menu::StandardItem;
 use ksni::{MenuItem, TrayMethods};
@@ -12,6 +12,8 @@ pub struct Tray {
     pub tx: mpsc::UnboundedSender<Request>,
     pub paused: bool,
     pub seconds: u32,
+    /// "Alt+S"
+    pub hotkey: String,
 }
 
 fn send(t: &Tray, cmd: &str) {
@@ -21,7 +23,7 @@ fn send(t: &Tray, cmd: &str) {
     });
 }
 
-/// Starts another instance of this binary for a window (`menu`, `settings`),
+/// Starts another instance of this binary for a window (`library`),
 /// so the recorder itself never links a GUI into its address space.
 pub fn open_window(which: &str) {
     if let Ok(exe) = std::env::current_exe() {
@@ -57,40 +59,23 @@ impl ksni::Tray for Tray {
         }
     }
     fn activate(&mut self, _x: i32, _y: i32) {
-        open_window("menu");
+        open_window("library");
     }
     fn menu(&self) -> Vec<MenuItem<Self>> {
         vec![
             StandardItem {
-                label: format!("Save last {} s", self.seconds),
+                label: "Save clip".into(),
                 icon_name: "media-record".into(),
+                enabled: !self.paused,
+                shortcut: vec![self.hotkey.split('+').map(str::to_owned).collect()],
                 activate: Box::new(|t: &mut Self| send(t, "save")),
                 ..Default::default()
             }
             .into(),
             StandardItem {
-                label: if self.paused {
-                    "Resume buffer"
-                } else {
-                    "Pause buffer"
-                }
-                .into(),
-                activate: Box::new(|t: &mut Self| send(t, "toggle-pause")),
-                ..Default::default()
-            }
-            .into(),
-            MenuItem::Separator,
-            StandardItem {
-                label: "Open clips folder".into(),
+                label: "Open library".into(),
                 icon_name: "folder-videos".into(),
-                activate: Box::new(|t: &mut Self| send(t, "open-folder")),
-                ..Default::default()
-            }
-            .into(),
-            StandardItem {
-                label: "Settings…".into(),
-                icon_name: "preferences-system".into(),
-                activate: Box::new(|_: &mut Self| open_window("settings")),
+                activate: Box::new(|_: &mut Self| open_window("library")),
                 ..Default::default()
             }
             .into(),

@@ -134,19 +134,6 @@ pub fn gpu_name() -> Option<String> {
     }
 }
 
-/// "1.2.4", from `pipewire --version`.
-pub fn pipewire_version() -> Option<String> {
-    let out = std::process::Command::new("pipewire")
-        .arg("--version")
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    text.lines()
-        .find(|l| l.contains("libpipewire"))
-        .and_then(|l| l.split_whitespace().last())
-        .map(str::to_owned)
-}
-
 pub fn session_type() -> &'static str {
     if std::env::var_os("WAYLAND_DISPLAY").is_some() {
         "Wayland"

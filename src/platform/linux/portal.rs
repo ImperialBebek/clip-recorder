@@ -17,11 +17,6 @@ fn token_path() -> PathBuf {
     super::state_dir().join("restore_token")
 }
 
-/// True once a screen was picked and remembered.
-pub fn has_token() -> bool {
-    token_path().exists()
-}
-
 /// Asks the desktop portal for a screen. The choice is remembered with a
 /// restore token, so the picker only shows on first run (or with --reselect).
 pub async fn open(reselect: bool) -> Result<PortalStream> {

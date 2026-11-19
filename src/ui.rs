@@ -1,21 +1,25 @@
-//! The windows: tray menu, settings, first-run check and the save toast. Each
-//! runs as its own short-lived process (`clip-recorder menu`, ...) and talks to
-//! the recorder over the control socket, so the recorder never loads a GUI.
+//! The windows: the clips library and the save toast. Each runs as its own
+//! short-lived process (`clip-recorder library`, `osd`) and talks to the
+//! recorder over the control socket, so the recorder never loads a GUI.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::BufRead;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use gstreamer as gst;
+use gstreamer::prelude::*;
+use gstreamer_app as gst_app;
+use slint::winit_030::WinitWindowAccessor;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
-use crate::capture::AudioSource;
+use crate::clips;
 use crate::config::{self, Config, Quality};
-use crate::encoder::Encoder;
 use crate::platform::ipc;
-use crate::{clips, sysinfo};
 
 slint::include_modules!();
 
@@ -39,162 +43,9 @@ fn num(s: &Status, k: &str) -> u64 {
     get(s, k).parse().unwrap_or(0)
 }
 
-fn mmss(secs: u64) -> String {
-    format!("{:02}:{:02}", secs / 60, secs % 60)
-}
-
-fn mb(bytes: u64) -> String {
-    format!("{:.1} MB", bytes as f64 / 1_000_000.0)
-}
-
-fn keys(s: &Status) -> ModelRc<SharedString> {
-    let hk = get(s, "hotkey");
-    let hk = if hk.is_empty() { "Alt+S" } else { hk };
-    let v: Vec<SharedString> = hk.split('+').map(SharedString::from).collect();
-    ModelRc::new(VecModel::from(v))
-}
-
-fn strings(v: &[&str]) -> ModelRc<SharedString> {
-    ModelRc::new(VecModel::from(
-        v.iter().map(|s| SharedString::from(*s)).collect::<Vec<_>>(),
-    ))
-}
-
-/// Buffer readouts shared by the menu and settings: fill, "00:42 / 01:00", RAM.
-fn buffer(s: &Status) -> (f32, String, String) {
-    let window = num(s, "window").max(1);
-    let held = num(s, "buffered_ms") / 1000;
-    let fill = (num(s, "buffered_ms") as f32 / (window as f32 * 1000.0)).min(1.0);
-    let ram = num(s, "ram");
-    let ram = match ram {
-        0 => "0 MB RAM".to_owned(),
-        1..=999_999 => "<1 MB RAM".to_owned(),
-        b => format!("~{} MB RAM", (b + 500_000) / 1_000_000),
-    };
-    (fill, format!("{} / {}", mmss(held), mmss(window)), ram)
-}
-
-fn state_label(s: &Status, long: bool) -> (bool, String) {
-    match get(s, "state") {
-        "live" if long => (true, format!("Live · {} s buffer", get(s, "window"))),
-        "live" => (true, "Live".into()),
-        "idle" => (false, "Idle · no game".into()),
-        "paused" => (false, "Paused".into()),
-        _ => (false, "Stopped".into()),
-    }
-}
-
-fn encoder_line(s: &Status) -> String {
-    [get(s, "encoder"), get(s, "codec"), get(s, "video")]
-        .iter()
-        .filter(|x| !x.is_empty())
-        .copied()
-        .collect::<Vec<_>>()
-        .join(" · ")
-}
-
-fn request_async(cmd: &'static str) {
-    std::thread::spawn(move || {
-        if let Err(e) = ipc::request(cmd) {
-            eprintln!("{cmd}: {e:#}");
-        }
-    });
-}
-
-pub fn menu() -> Result<()> {
-    let ui = TrayMenu::new()?;
-
-    let refresh = {
-        let ui = ui.as_weak();
-        move || {
-            let Some(ui) = ui.upgrade() else { return };
-            let Ok(s) = ipc::status() else {
-                ui.set_live(false);
-                ui.set_state_label("Stopped".into());
-                return;
-            };
-            let (live, label) = state_label(&s, false);
-            let (fill, text, ram) = buffer(&s);
-            ui.set_live(live);
-            ui.set_paused(!live);
-            ui.set_state_label(label.into());
-            ui.set_fill(fill);
-            ui.set_buffer_text(text.into());
-            ui.set_ram_text(ram.into());
-            ui.set_encoder_text(encoder_line(&s).into());
-            ui.set_seconds(num(&s, "window") as i32);
-            ui.set_hotkey(keys(&s));
-            ui.set_folder(get(&s, "output").into());
-            let dir = get(&s, "output_abs");
-            let recent: Vec<RecentClip> = clips::recent(dir.as_ref(), 3)
-                .into_iter()
-                .map(|c| RecentClip {
-                    title: c.title.into(),
-                    length: c
-                        .seconds
-                        .map(|x| format!("{x:.0} s"))
-                        .unwrap_or_default()
-                        .into(),
-                    path: c.path.display().to_string().into(),
-                })
-                .collect();
-            let model = ui.get_recent();
-            if model.row_count() != recent.len()
-                || model.iter().zip(&recent).any(|(a, b)| a.path != b.path)
-            {
-                ui.set_recent(ModelRc::new(VecModel::from(recent)));
-            }
-        }
-    };
-    refresh();
-    let timer = Timer::default();
-    timer.start(TimerMode::Repeated, Duration::from_millis(250), refresh);
-
-    let quit = || {
-        let _ = slint::quit_event_loop();
-    };
-    ui.on_save(move || {
-        let _ = ipc::send("save");
-        quit();
-    });
-    ui.on_toggle_pause(|| request_async("toggle-pause"));
-    ui.on_open_clip(move |p| {
-        open_path(&p);
-        quit();
-    });
-    ui.on_open_folder(move || {
-        let _ = ipc::send("open-folder");
-        quit();
-    });
-    ui.on_settings(move || {
-        spawn_detached(&["settings"]);
-        quit();
-    });
-    ui.on_quit(move || {
-        let _ = ipc::request("quit");
-        quit();
-    });
-    ui.on_dismiss(quit);
-    ui.run()?;
-    Ok(())
-}
-
-const LENGTHS: [u32; 7] = [15, 30, 60, 90, 120, 180, 300];
-const FPS: [u32; 5] = [30, 60, 90, 120, 144];
-const ENCODERS: [Option<Encoder>; 5] = [
-    None,
-    Some(Encoder::Va),
-    Some(Encoder::Vaapi),
-    Some(Encoder::Nvenc),
-    Some(Encoder::X264),
-];
-const AUDIO: [AudioSource; 4] = [
-    AudioSource::Auto,
-    AudioSource::PipeWire,
-    AudioSource::Pulse,
-    AudioSource::None,
-];
 const QUALITY: [Quality; 3] = [Quality::Light, Quality::High, Quality::Max];
+const DURATIONS: [u32; 3] = [30, 60, 120];
+const AUDIO_KBPS: u64 = 160;
 
 /// Writes one change to the config file and tells the recorder to reload it.
 fn change(key: &'static str, f: impl FnOnce(&mut Config) + Send + 'static) {
@@ -212,357 +63,302 @@ fn change(key: &'static str, f: impl FnOnce(&mut Config) + Send + 'static) {
     });
 }
 
-fn choose_folder() -> Option<std::path::PathBuf> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .ok()?;
-    rt.block_on(async {
-        let files = ashpd::desktop::file_chooser::OpenFileRequest::default()
-            .title("Save clips to")
-            .directory(true)
-            .send()
-            .await
-            .ok()?
-            .response()
-            .ok()?;
-        file_uri_path(files.uris().first()?.as_str())
-    })
+/// "Today 14:52", "Yesterday 22:14", "Mon 20:03", "Nov 02".
+fn when(t: SystemTime) -> String {
+    use gst::glib::DateTime;
+    let secs = t
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    let (Ok(at), Ok(now)) = (DateTime::from_unix_local(secs), DateTime::now_local()) else {
+        return String::new();
+    };
+    let day = |d: &DateTime| d.ymd();
+    let fmt = |f: &str| at.format(f).map(|s| s.to_string()).unwrap_or_default();
+    let days_ago = (0..7).find(|&n| {
+        now.add_days(-n)
+            .map(|d| day(&d) == day(&at))
+            .unwrap_or(false)
+    });
+    match days_ago {
+        Some(0) => fmt("Today %H:%M"),
+        Some(1) => fmt("Yesterday %H:%M"),
+        Some(_) => fmt("%a %H:%M"),
+        None => fmt("%b %d"),
+    }
 }
 
-/// `file:///home/me/My%20Clips` -> `/home/me/My Clips`.
-fn file_uri_path(uri: &str) -> Option<std::path::PathBuf> {
-    let raw = uri.strip_prefix("file://")?.as_bytes();
-    let mut out = Vec::with_capacity(raw.len());
-    let mut i = 0;
-    while i < raw.len() {
-        if raw[i] == b'%' && i + 2 < raw.len() {
-            if let Ok(b) = u8::from_str_radix(std::str::from_utf8(&raw[i + 1..i + 3]).ok()?, 16) {
-                out.push(b);
-                i += 3;
+fn length(secs: Option<f64>) -> String {
+    secs.map(|s| {
+        let s = s.round() as u64;
+        format!("{}:{:02}", s / 60, s % 60)
+    })
+    .unwrap_or_default()
+}
+
+fn thumb_dir() -> PathBuf {
+    std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| crate::home().join(".cache"))
+        .join("clip-recorder/thumbs")
+}
+
+fn thumb_path(clip: &Path) -> PathBuf {
+    let name = clip.file_stem().unwrap_or_default().to_string_lossy();
+    thumb_dir().join(format!("{name}.png"))
+}
+
+/// A cached thumbnail that is newer than its clip.
+fn cached_thumb(clip: &Path, modified: SystemTime) -> Option<slint::Image> {
+    let p = thumb_path(clip);
+    let t = std::fs::metadata(&p).ok()?.modified().ok()?;
+    (t >= modified).then(|| slint::Image::load_from_path(&p).ok())?
+}
+
+/// Decodes the frame at 1 s (or the first one) and stores it as a 480x270 PNG.
+fn make_thumb(clip: &Path, out: &Path) -> Result<()> {
+    let pipeline = gst::parse::launch(
+        "filesrc name=src ! decodebin ! videoconvert ! videoscale \
+         ! video/x-raw,format=RGB,width=480,height=270,pixel-aspect-ratio=1/1 \
+         ! pngenc ! appsink name=sink sync=false",
+    )?
+    .downcast::<gst::Pipeline>()
+    .map_err(|_| anyhow::anyhow!("not a pipeline"))?;
+    pipeline
+        .by_name("src")
+        .context("no filesrc")?
+        .set_property("location", clip.to_string_lossy().as_ref());
+    let sink = pipeline
+        .by_name("sink")
+        .and_downcast::<gst_app::AppSink>()
+        .context("no appsink")?;
+    let result = (|| {
+        pipeline.set_state(gst::State::Paused)?;
+        let (r, ..) = pipeline.state(gst::ClockTime::from_seconds(5));
+        r?;
+        if pipeline
+            .seek_simple(
+                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                gst::ClockTime::from_seconds(1),
+            )
+            .is_ok()
+        {
+            let _ = pipeline.state(gst::ClockTime::from_seconds(5));
+        }
+        let sample = sink
+            .try_pull_preroll(gst::ClockTime::from_seconds(5))
+            .context("no frame")?;
+        let buf = sample.buffer().context("empty frame")?;
+        let map = buf.map_readable()?;
+        std::fs::create_dir_all(out.parent().unwrap())?;
+        std::fs::write(out, map.as_slice())?;
+        Ok(())
+    })();
+    let _ = pipeline.set_state(gst::State::Null);
+    result
+}
+
+/// Makes missing thumbnails off the UI thread and hands each one back.
+fn thumb_worker(ui: slint::Weak<Library>) -> std::sync::mpsc::Sender<PathBuf> {
+    let (tx, rx) = std::sync::mpsc::channel::<PathBuf>();
+    std::thread::spawn(move || {
+        if gst::init().is_err() {
+            return;
+        }
+        for clip in rx {
+            let out = thumb_path(&clip);
+            if let Err(e) = make_thumb(&clip, &out) {
+                eprintln!("thumbnail {}: {e:#}", clip.display());
                 continue;
             }
+            let ui = ui.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = ui.upgrade() else { return };
+                let Ok(img) = slint::Image::load_from_path(&out) else {
+                    return;
+                };
+                let model = ui.get_clips();
+                let path = clip.display().to_string();
+                if let Some(i) = model.iter().position(|c| c.path == path) {
+                    let mut c = model.row_data(i).unwrap();
+                    c.thumb = img;
+                    model.set_row_data(i, c);
+                }
+            });
         }
-        out.push(raw[i]);
-        i += 1;
-    }
-    use std::os::unix::ffi::OsStringExt;
-    Some(std::ffi::OsString::from_vec(out).into())
+    });
+    tx
 }
 
-pub fn settings() -> Result<()> {
-    let ui = Settings::new()?;
-    let gpu = sysinfo::gpu_name();
-    ui.set_version_text(
-        format!(
-            "v{} · {}",
-            env!("CARGO_PKG_VERSION"),
-            sysinfo::session_type()
-        )
-        .into(),
-    );
-    ui.set_pipewire_text(
-        sysinfo::pipewire_version()
-            .map(|v| format!("PipeWire {v}"))
-            .unwrap_or_else(|| "PipeWire not found".into())
-            .into(),
-    );
-    ui.set_length_options(strings(&[
-        "15 s", "30 s", "60 s", "90 s", "120 s", "180 s", "300 s",
-    ]));
-    ui.set_fps_options(strings(&[
-        "30 fps", "60 fps", "90 fps", "120 fps", "144 fps",
-    ]));
-    ui.set_audio_options(strings(&["Auto", "PipeWire", "PulseAudio", "Off"]));
+/// Only one library window: a second `clip-recorder library` raises the first.
+fn single_instance(ui: slint::Weak<Library>) -> Option<std::os::unix::net::UnixListener> {
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr, UnixListener, UnixStream};
+    let addr = SocketAddr::from_abstract_name(b"clip-recorder-library").ok()?;
+    match UnixListener::bind_addr(&addr) {
+        Ok(l) => {
+            let listener = l.try_clone().ok()?;
+            std::thread::spawn(move || {
+                for _ in listener.incoming() {
+                    let ui = ui.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = ui.upgrade() {
+                            ui.window().with_winit_window(|w| w.focus_window());
+                        }
+                    });
+                }
+            });
+            Some(l)
+        }
+        Err(_) => {
+            let _ = UnixStream::connect_addr(&addr);
+            None
+        }
+    }
+}
+
+fn hotkey_keys(combo: &str) -> ModelRc<SharedString> {
+    let combo = if combo.is_empty() { "Alt+S" } else { combo };
+    let v: Vec<SharedString> = combo.split('+').map(SharedString::from).collect();
+    ModelRc::new(VecModel::from(v))
+}
+
+pub fn library() -> Result<()> {
+    gst::init()?;
+    let ui = Library::new()?;
+    let Some(_instance) = single_instance(ui.as_weak()) else {
+        return Ok(());
+    };
+    let thumbs = thumb_worker(ui.as_weak());
+    let output = Rc::new(RefCell::new(String::new()));
+    let listed: Rc<RefCell<Option<Vec<(PathBuf, SystemTime)>>>> = Rc::default();
 
     let refresh = {
         let ui = ui.as_weak();
-        let gpu = gpu.clone();
+        let output = output.clone();
         move || {
             let Some(ui) = ui.upgrade() else { return };
-            let Ok(s) = ipc::status() else {
-                ui.set_connected(false);
-                ui.set_live(false);
-                ui.set_state_label("Stopped".into());
-                return;
+            let s = ipc::status().ok();
+            let cfg = Config::load();
+            let (window, quality, kbps, video, dir, folder, hotkey) = match &s {
+                Some(s) => (
+                    num(s, "window") as u32,
+                    get(s, "quality").to_owned(),
+                    num(s, "kbps"),
+                    get(s, "video").to_owned(),
+                    get(s, "output_abs").to_owned(),
+                    get(s, "output").to_owned(),
+                    get(s, "hotkey").to_owned(),
+                ),
+                None => (
+                    cfg.duration,
+                    cfg.quality.name().to_owned(),
+                    cfg.quality.kbps() as u64,
+                    String::new(),
+                    cfg.output.display().to_string(),
+                    config::tilde(&cfg.output),
+                    String::new(),
+                ),
             };
-            ui.set_connected(true);
-            let (live, label) = state_label(&s, true);
-            let (fill, text, ram) = buffer(&s);
+            let (live, label) = match s.as_ref().map(|s| get(s, "state")) {
+                Some("live") => (true, format!("Buffering · {window} s")),
+                Some("idle") => (false, "Idle · no game".to_owned()),
+                Some("paused") => (false, "Paused".to_owned()),
+                _ => (false, "Stopped · start".to_owned()),
+            };
             ui.set_live(live);
-            ui.set_paused(!live);
             ui.set_state_label(label.into());
-            ui.set_fill(fill);
-            ui.set_buffer_text(text.into());
-            ui.set_ram_text(ram.into());
-            ui.set_encoder_line(encoder_line(&s).into());
-            ui.set_hotkey(keys(&s));
-            ui.set_hotkey_text(get(&s, "hotkey").into());
-            ui.set_hotkey_backend(
-                match get(&s, "hotkey_backend") {
-                    "portal" => "Registered through the GlobalShortcuts portal. Your desktop lists it in its shortcut settings.",
-                    "evdev" => "Read from /dev/input; works on every compositor while you are in the input group.",
-                    _ => "No global hotkey right now. Bind `clip-recorder save` in your desktop's shortcut settings.",
-                }
-                .into(),
-            );
-            ui.set_gpu_text(
-                gpu.as_ref()
-                    .map(|g| format!("Detected: {g}"))
-                    .unwrap_or_default()
-                    .into(),
-            );
-            ui.set_warning(get(&s, "warning").into());
-
-            let vendor = gpu
-                .as_deref()
-                .and_then(|g| g.split_whitespace().next())
-                .unwrap_or("");
-            let active = get(&s, "encoder");
-            let auto = match (get(&s, "encoder_setting"), vendor) {
-                ("auto", "") => format!("Auto ({active})"),
-                ("auto", v) => format!("Auto ({active} · {v})"),
-                _ => "Auto".into(),
-            };
-            ui.set_encoder_options(strings(&[
-                &auto,
-                "VA-API (va)",
-                "VA-API (vaapi)",
-                "NVENC",
-                "Software (x264)",
-            ]));
-            let enc = Encoder::parse(get(&s, "encoder_setting")).ok().flatten();
-            ui.set_encoder_index(ENCODERS.iter().position(|e| *e == enc).unwrap_or(0) as i32);
-
-            let q = QUALITY
-                .iter()
-                .position(|q| q.name() == get(&s, "quality"))
-                .unwrap_or(1);
-            ui.set_quality_index(q as i32);
-            ui.set_bitrate_text(format!("{} Mb/s", num(&s, "kbps") / 1000).into());
-            ui.set_output_text(get(&s, "output").into());
-            let game = get(&s, "game");
-            let slug = if game.is_empty() {
-                "Game".to_owned()
-            } else {
-                game.replace(' ', "_")
-            };
-            ui.set_name_example(format!("{slug}_2026-11-19_145230.mp4").into());
-
-            let window = num(&s, "window") as u32;
-            let idx = LENGTHS.iter().position(|l| *l == window);
-            if idx.is_none() {
-                let mut opts: Vec<String> = LENGTHS.iter().map(|l| format!("{l} s")).collect();
-                opts.push(format!("{window} s"));
-                ui.set_length_options(ModelRc::new(VecModel::from(
-                    opts.into_iter().map(SharedString::from).collect::<Vec<_>>(),
-                )));
+            ui.set_seconds(window as i32);
+            if !hotkey.is_empty() || s.is_none() {
+                ui.set_hotkey(hotkey_keys(&hotkey));
             }
-            ui.set_length_index(idx.unwrap_or(LENGTHS.len()) as i32);
-            let fps = num(&s, "fps") as u32;
-            ui.set_fps_index(FPS.iter().position(|f| *f == fps).map_or(-1, |i| i as i32));
-            let audio = AudioSource::parse(get(&s, "audio_setting")).unwrap_or(AudioSource::Auto);
-            ui.set_audio_index(AUDIO.iter().position(|a| *a == audio).unwrap_or(0) as i32);
-            ui.set_audio_active(
-                match get(&s, "audio") {
-                    "pipewire" => "PipeWire desktop audio",
-                    "pulse" => "PulseAudio monitor",
-                    "test" => "test tone",
-                    _ => "video only",
-                }
-                .into(),
-            );
-            ui.set_pause_without_game(get(&s, "pause_without_game") == "true");
-            ui.set_toast(get(&s, "toast") == "true");
-            ui.set_sound(get(&s, "sound") == "true");
-            let (bytes, n) = clips::usage(get(&s, "output_abs").as_ref());
-            ui.set_storage_text(
-                format!("{n} clips, {} in {}", mb(bytes), get(&s, "output")).into(),
-            );
+            let q = QUALITY.iter().position(|x| x.name() == quality);
+            ui.set_quality(q.map_or(-1, |i| i as i32));
+            let d = DURATIONS.iter().position(|&x| x == window);
+            ui.set_duration(d.map_or(-1, |i| i as i32));
+            let mbps = kbps as f64 / 1000.0;
+            let note = if video.is_empty() {
+                format!("{mbps:.0} Mb/s")
+            } else {
+                format!("{video} · {mbps:.0} Mb/s")
+            };
+            ui.set_quality_note(note.into());
+            let ram = (kbps + AUDIO_KBPS) * 1000 / 8 * window as u64;
+            ui.set_duration_note(format!("~{} MB RAM", (ram + 500_000) / 1_000_000).into());
+
+            let dir_changed = *output.borrow() != dir;
+            *output.borrow_mut() = dir.clone();
+            let clips = clips::list(dir.as_ref());
+            let sig: Vec<_> = clips.iter().map(|c| (c.path.clone(), c.modified)).collect();
+            if !dir_changed && listed.borrow().as_ref() == Some(&sig) {
+                return;
+            }
+            *listed.borrow_mut() = Some(sig);
+            let (bytes, _) = clips::usage(dir.as_ref());
+            ui.set_folder_text(format!("{folder} · {} MB", (bytes + 500_000) / 1_000_000).into());
+            let old = ui.get_clips();
+            let cards: Vec<ClipCard> = clips
+                .into_iter()
+                .map(|c| {
+                    let path = c.path.display().to_string();
+                    let thumb = old
+                        .iter()
+                        .find(|o| o.path == path && o.thumb.size().width > 0)
+                        .map(|o| o.thumb)
+                        .or_else(|| cached_thumb(&c.path, c.modified))
+                        .unwrap_or_else(|| {
+                            let _ = thumbs.send(c.path.clone());
+                            slint::Image::default()
+                        });
+                    ClipCard {
+                        title: c.title.into(),
+                        when: when(c.modified).into(),
+                        length: length(c.seconds).into(),
+                        path: path.into(),
+                        thumb,
+                    }
+                })
+                .collect();
+            ui.set_clips(ModelRc::new(VecModel::from(cards)));
         }
     };
     refresh();
     let timer = Timer::default();
-    timer.start(TimerMode::Repeated, Duration::from_millis(250), refresh);
+    timer.start(TimerMode::Repeated, Duration::from_millis(1000), refresh);
 
-    ui.on_save_now(|| request_async("save"));
-    ui.on_toggle_pause(|| request_async("toggle-pause"));
-    ui.on_open_folder(|| request_async("open-folder"));
-    ui.on_reselect(|| request_async("reselect"));
-    ui.on_start_recorder(|| spawn_detached(&["run"]));
-    ui.on_set_length(|i| {
-        // Past the presets is the current custom length (from --duration or the
-        // file); picking it again changes nothing.
-        if let Some(&secs) = LENGTHS.get(i as usize) {
+    ui.on_open_clip(|p| open_path(&p));
+    ui.on_set_quality(|i| {
+        if let Some(&q) = QUALITY.get(i as usize) {
+            change("quality", move |c| c.quality = q);
+        }
+    });
+    ui.on_set_duration(|i| {
+        if let Some(&secs) = DURATIONS.get(i as usize) {
             change("duration", move |c| c.duration = secs);
         }
     });
-    ui.on_set_fps(|i| {
-        change("fps", move |c| {
-            c.fps = FPS.get(i as usize).copied().unwrap_or(c.fps)
-        })
-    });
-    ui.on_set_encoder(|i| {
-        change("encoder", move |c| {
-            c.encoder = ENCODERS.get(i as usize).copied().unwrap_or(c.encoder)
-        })
-    });
-    ui.on_set_audio(|i| {
-        change("audio", move |c| {
-            c.audio = AUDIO.get(i as usize).copied().unwrap_or(c.audio)
-        })
-    });
-    ui.on_set_quality(|i| {
-        change("quality", move |c| {
-            c.quality = QUALITY.get(i as usize).copied().unwrap_or(c.quality)
-        })
-    });
-    ui.on_set_pause_without_game(|v| {
-        change("pause_without_game", move |c| c.pause_without_game = v)
-    });
-    ui.on_set_toast(|v| change("toast", move |c| c.toast = v));
-    ui.on_set_sound(|v| change("sound", move |c| c.sound = v));
-    ui.on_choose_folder(|| {
-        std::thread::spawn(|| {
-            if let Some(dir) = choose_folder() {
-                change("output", move |c| c.output = dir);
+    ui.on_start_recorder(|| spawn_detached(&["run"]));
+    {
+        let weak = ui.as_weak();
+        ui.on_drag(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.window().with_winit_window(|w| {
+                    let _ = w.drag_window();
+                });
             }
         });
+    }
+    ui.on_close_window(|| {
+        let _ = slint::quit_event_loop();
     });
     ui.run()?;
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn file_uris() {
-        assert_eq!(
-            super::file_uri_path("file:///home/me/My%20Clips").unwrap(),
-            std::path::PathBuf::from("/home/me/My Clips")
-        );
-    }
-}
-
-fn check(ok: bool, title: &str, mono: &str, detail: &str, keys: &[&str]) -> Check {
-    Check {
-        ok,
-        title: title.into(),
-        mono: mono.into(),
-        detail: detail.into(),
-        keys: strings(keys),
-    }
-}
-
-async fn has_global_shortcuts() -> bool {
-    ashpd::desktop::global_shortcuts::GlobalShortcuts::new()
-        .await
-        .is_ok()
-}
-
-fn system_checks() -> Vec<Check> {
-    let _ = gstreamer::init();
-    let cfg = Config::load();
-    let gpu = sysinfo::gpu_name();
-    let on_gpu = gpu.map(|g| format!(" on {g}")).unwrap_or_default();
-    let hw = Encoder::AUTO_ORDER
-        .into_iter()
-        .filter(|e| e.is_hardware() && e.available())
-        .map(|e| e.label())
-        .next();
-    let encoder = match hw {
-        Some(label) => check(
-            true,
-            "Hardware encoder",
-            &format!("{label} · H.264"),
-            &on_gpu,
-            &[],
-        ),
-        None => check(
-            false,
-            "Hardware encoder",
-            "x264",
-            "· no VA-API or NVENC plugin found; clips are encoded on the CPU",
-            &[],
-        ),
-    };
-    let pipewire = match sysinfo::pipewire_version() {
-        Some(v) => check(
-            true,
-            "PipeWire",
-            &v,
-            "· desktop audio is captured from the default output",
-            &[],
-        ),
-        None => check(
-            false,
-            "PipeWire",
-            "",
-            "Not found. Screen capture needs PipeWire and xdg-desktop-portal.",
-            &[],
-        ),
-    };
-    let capture = check(
-        false,
-        "Screen capture permission",
-        "",
-        &format!(
-            "{} asks once through the desktop portal. Pick the monitor your games run on.",
-            sysinfo::session_type()
-        ),
-        &[],
-    );
-    let shortcuts = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map(|rt| rt.block_on(has_global_shortcuts()))
-        .unwrap_or(false);
-    let hk: Vec<String> = crate::daemon::pretty_combo(&cfg.hotkey)
-        .split('+')
-        .map(str::to_owned)
-        .collect();
-    let hk: Vec<&str> = hk.iter().map(String::as_str).collect();
-    let hotkey = if shortcuts {
-        check(
-            true,
-            "Global hotkey",
-            "",
-            "Registered through the GlobalShortcuts portal",
-            &hk,
-        )
-    } else {
-        check(
-            false,
-            "Global hotkey",
-            "",
-            "No GlobalShortcuts portal; uses /dev/input, or bind `clip-recorder save`",
-            &hk,
-        )
-    };
-    let _ = config::tilde(&cfg.output);
-    vec![encoder, pipewire, capture, hotkey]
-}
-
-/// Returns true when the user chose "Allow screen capture".
-pub fn first_run() -> Result<bool> {
-    let ui = FirstRun::new()?;
-    ui.set_checks(ModelRc::new(VecModel::from(system_checks())));
-    let allowed = Rc::new(std::cell::Cell::new(false));
-    let a = allowed.clone();
-    ui.on_allow(move || {
-        a.set(true);
-        let _ = slint::quit_event_loop();
-    });
-    ui.on_later(|| {
-        let _ = slint::quit_event_loop();
-    });
-    ui.run()?;
-    Ok(allowed.get())
-}
-
 enum OsdEvent {
-    Saving(String),
+    Saving,
+    /// Seconds saved.
     Saved(String),
+    /// Short reason ("Disk full").
     Failed(String),
     Closed,
 }
@@ -571,26 +367,15 @@ fn parse_osd(line: &str) -> Option<OsdEvent> {
     let (kind, rest) = line.split_once(' ').unwrap_or((line, ""));
     let f: Vec<&str> = rest.split('\t').collect();
     Some(match kind {
-        "saving" => OsdEvent::Saving(format!("Muxing last {} s", f[0])),
-        "saved" => {
-            let bytes: u64 = f.get(2).and_then(|b| b.parse().ok()).unwrap_or(0);
-            let parts: Vec<String> = [
-                format!("Last {} s", f[0]),
-                f.get(1).unwrap_or(&"").to_string(),
-                mb(bytes),
-            ]
-            .into_iter()
-            .filter(|s| !s.is_empty())
-            .collect();
-            OsdEvent::Saved(parts.join(" · "))
-        }
-        "failed" => OsdEvent::Failed(format!("{} · {}", f[0], f.get(1).unwrap_or(&""))),
+        "saving" => OsdEvent::Saving,
+        "saved" => OsdEvent::Saved(f[0].to_owned()),
+        "failed" => OsdEvent::Failed(f[0].to_owned()),
         _ => return None,
     })
 }
 
-/// The toast. Reads state lines from stdin (see `daemon::Osd`); hides 2.4 s
-/// after "saved", stays after "failed" until clicked.
+/// The toast. Reads state lines from stdin (see `daemon::Osd`). Nothing shows
+/// while saving; "saved" shows for 2.4 s, "failed" stays until clicked.
 pub fn osd() -> Result<()> {
     let ui = Osd::new()?;
     if let Some((w, _)) = screen_size() {
@@ -640,7 +425,10 @@ pub fn osd() -> Result<()> {
     ui.on_dismiss(|| {
         let _ = slint::quit_event_loop();
     });
-    ui.show()?;
+    ui.on_open(|| {
+        spawn_detached(&["library"]);
+        let _ = slint::quit_event_loop();
+    });
     slint::run_event_loop_until_quit()?;
     Ok(())
 }
@@ -648,21 +436,19 @@ pub fn osd() -> Result<()> {
 fn apply_osd(ui: slint::Weak<Osd>, ev: OsdEvent) {
     let Some(ui) = ui.upgrade() else { return };
     match ev {
-        OsdEvent::Saving(d) => {
-            ui.set_state(0);
-            ui.set_heading("Saving clip…".into());
-            ui.set_detail(d.into());
-        }
-        OsdEvent::Saved(d) => {
+        OsdEvent::Saving => ui.set_state(0),
+        OsdEvent::Saved(secs) => {
             ui.set_state(1);
-            ui.set_heading("Clip saved".into());
-            ui.set_detail(d.into());
+            ui.set_heading(format!("Saved {secs} s").into());
+            ui.set_detail("Open in Clips".into());
             ui.set_progress(1.0);
+            let _ = ui.show();
         }
-        OsdEvent::Failed(d) => {
+        OsdEvent::Failed(reason) => {
             ui.set_state(2);
-            ui.set_heading("Couldn't save clip".into());
-            ui.set_detail(d.into());
+            ui.set_heading("Couldn't save".into());
+            ui.set_detail(reason.into());
+            let _ = ui.show();
         }
         // The recorder went away mid-save: don't leave a spinner behind.
         OsdEvent::Closed if ui.get_state() == 0 => {

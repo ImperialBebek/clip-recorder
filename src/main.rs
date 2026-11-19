@@ -28,8 +28,7 @@ USAGE:
     clip-recorder save              save a clip from the running recorder
     clip-recorder pause|resume      pause or resume the buffer (pausing frees its RAM)
     clip-recorder status            print the recorder's state
-    clip-recorder settings          open the settings window
-    clip-recorder menu              open the tray menu window
+    clip-recorder library           open the clips window
     clip-recorder quit              stop the running recorder
 
 OPTIONS (override ~/.config/clip-recorder/config for this run):
@@ -41,7 +40,7 @@ OPTIONS (override ~/.config/clip-recorder/config for this run):
     -o, --output <DIR>        where clips go                      [default: ~/Videos/Clips]
     -k, --hotkey <COMBO>      global save hotkey                  [default: alt+s]
         --no-hotkey           only save via `clip-recorder save` or SIGUSR1
-        --headless            no tray, first-run window or toasts
+        --headless            no tray or toasts
         --reselect            show the screen picker again
         --test-source         record a test pattern and tone instead of the screen
     -h, --help                print this help
@@ -77,9 +76,7 @@ fn parse_args() -> Result<Cmd> {
                     "resume" => return Ok(Cmd::Client("resume")),
                     "status" => return Ok(Cmd::Client("status")),
                     "quit" => return Ok(Cmd::Client("quit")),
-                    "settings" => return Ok(Cmd::Window("settings")),
-                    "menu" => return Ok(Cmd::Window("menu")),
-                    "first-run" => return Ok(Cmd::Window("first-run")),
+                    "library" => return Ok(Cmd::Window("library")),
                     "osd" => return Ok(Cmd::Window("osd")),
                     _ => bail!("unknown command '{cmd}'"),
                 }
@@ -128,14 +125,8 @@ fn main() -> ExitCode {
             }
         }),
         Ok(Cmd::Window(w)) => match w {
-            "first-run" => match ui::first_run() {
-                Ok(true) => Ok(()),
-                Ok(false) => return ExitCode::from(2),
-                Err(e) => Err(e),
-            },
             "osd" => ui::osd(),
-            "menu" => ui::menu(),
-            _ => ui::settings(),
+            _ => ui::library(),
         },
         Ok(Cmd::Run(cfg, flags)) => tokio::runtime::Builder::new_current_thread()
             .enable_all()

@@ -27,7 +27,7 @@ pub struct Flags {
     pub hotkey: bool,
     pub reselect: bool,
     pub test_source: bool,
-    /// Tray, first-run window and OSD. Off with `--headless`.
+    /// Tray and save toast. Off with `--headless`.
     pub ui: bool,
 }
 
@@ -368,17 +368,6 @@ fn open_path(p: &std::path::Path) {
     }
 }
 
-/// Shows the first-run window; true when the user chose to allow capture.
-fn first_run() -> bool {
-    let Ok(exe) = std::env::current_exe() else {
-        return true;
-    };
-    match Command::new(exe).arg("first-run").status() {
-        Ok(s) => s.success(),
-        Err(_) => true,
-    }
-}
-
 async fn install_hotkey(combo: &str, tx: &mpsc::UnboundedSender<ipc::Request>) -> &'static str {
     let save = |tx: mpsc::UnboundedSender<ipc::Request>| {
         move || {
@@ -420,11 +409,6 @@ pub async fn run(cfg: Config, flags: Flags) -> Result<()> {
 
     let (tx, mut rx) = mpsc::unbounded_channel::<ipc::Request>();
     ipc::serve(tx.clone())?;
-
-    if flags.ui && !flags.test_source && !portal::has_token() && !first_run() {
-        let _ = std::fs::remove_file(ipc::socket_path());
-        return Ok(());
-    }
 
     // Held for the whole run: dropping it closes the portal session.
     let mut stream = if flags.test_source {
@@ -475,6 +459,7 @@ pub async fn run(cfg: Config, flags: Flags) -> Result<()> {
             tx: tx.clone(),
             paused: false,
             seconds: d.cfg.duration,
+            hotkey: pretty_combo(&d.cfg.hotkey),
         })
         .await
     } else {
