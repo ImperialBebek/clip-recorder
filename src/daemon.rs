@@ -98,7 +98,9 @@ impl Daemon {
         self.warning.clear();
         if self.cfg.encoder.is_none() && !rec.encoder.is_hardware() {
             self.warning = "No hardware encoder found, recording on the CPU (x264)".into();
-            notify("Clip Recorder", &self.warning);
+            if self.flags.ui {
+                notify("Clip Recorder", &self.warning);
+            }
         }
         eprintln!(
             "recording: {}s buffer, {} fps, {} kbit/s, encoder {}, audio {}",
@@ -249,7 +251,7 @@ impl Daemon {
                     eprintln!("saved {s:.1}s clip: {}", path.display());
                     match &mut osd {
                         Some(o) => o.send(&format!("saved {s:.0}\t{video}\t{bytes}")),
-                        None if toast => notify("Clip saved", &path.display().to_string()),
+                        None if ui && toast => notify("Clip saved", &path.display().to_string()),
                         None => {}
                     }
                     if sound {
@@ -262,7 +264,8 @@ impl Daemon {
                     let reason = save_error_reason(&e);
                     match &mut osd {
                         Some(o) => o.send(&format!("failed {reason}\t{dir}")),
-                        None => notify("Couldn't save clip", &reason),
+                        None if ui => notify("Couldn't save clip", &reason),
+                        None => {}
                     }
                     Err(format!("{e:#}"))
                 }
