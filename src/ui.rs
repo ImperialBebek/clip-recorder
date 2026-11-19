@@ -21,26 +21,6 @@ slint::include_modules!();
 
 type Status = HashMap<String, String>;
 
-fn has_font(family: &str) -> bool {
-    Command::new("fc-list")
-        .arg(":family")
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains(family))
-        .unwrap_or(false)
-}
-
-/// The design's faces are PP Valve (display) and PP Mori (body); they are
-/// licensed, so the repo bundles open stand-ins and uses the real ones only
-/// when they are installed on the system.
-fn apply_fonts(theme: Theme) {
-    if has_font("PP Valve") {
-        theme.set_display_font("PP Valve".into());
-    }
-    if has_font("PP Mori") {
-        theme.set_body_font("PP Mori".into());
-    }
-}
-
 fn spawn_detached(args: &[&str]) {
     if let Ok(exe) = std::env::current_exe() {
         let _ = Command::new(exe).args(args).spawn();
@@ -123,7 +103,6 @@ fn request_async(cmd: &'static str) {
 
 pub fn menu() -> Result<()> {
     let ui = TrayMenu::new()?;
-    apply_fonts(ui.global::<Theme>());
 
     let refresh = {
         let ui = ui.as_weak();
@@ -273,7 +252,6 @@ fn file_uri_path(uri: &str) -> Option<std::path::PathBuf> {
 
 pub fn settings() -> Result<()> {
     let ui = Settings::new()?;
-    apply_fonts(ui.global::<Theme>());
     let gpu = sysinfo::gpu_name();
     ui.set_version_text(
         format!(
@@ -568,7 +546,6 @@ fn system_checks() -> Vec<Check> {
 /// Returns true when the user chose "Allow screen capture".
 pub fn first_run() -> Result<bool> {
     let ui = FirstRun::new()?;
-    apply_fonts(ui.global::<Theme>());
     ui.set_checks(ModelRc::new(VecModel::from(system_checks())));
     let allowed = Rc::new(std::cell::Cell::new(false));
     let a = allowed.clone();
@@ -616,7 +593,6 @@ fn parse_osd(line: &str) -> Option<OsdEvent> {
 /// after "saved", stays after "failed" until clicked.
 pub fn osd() -> Result<()> {
     let ui = Osd::new()?;
-    apply_fonts(ui.global::<Theme>());
     if let Some((w, _)) = screen_size() {
         ui.window()
             .set_position(slint::PhysicalPosition::new(w as i32 - 340, 20));

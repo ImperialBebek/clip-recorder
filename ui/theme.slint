@@ -1,5 +1,4 @@
-// Open stand-ins for the design's PP Valve (display) and PP Mori (body).
-// The Rust side switches to the PP faces when they are installed.
+// Bundled OFL faces: Bricolage Grotesque (display), Geist (body), Geist Mono.
 import "../assets/fonts/Geist-Regular.ttf";
 import "../assets/fonts/Geist-Medium.ttf";
 import "../assets/fonts/Geist-SemiBold.ttf";
@@ -8,8 +7,8 @@ import "../assets/fonts/GeistMono-Medium.ttf";
 import "../assets/fonts/BricolageGrotesque-Medium.ttf";
 
 export global Theme {
-    in-out property <string> display-font: "Bricolage Grotesque";
-    in-out property <string> body-font: "Geist";
+    out property <string> display-font: "Bricolage Grotesque";
+    out property <string> body-font: "Geist";
     out property <string> mono-font: "Geist Mono";
 
     out property <color> bg: #0e0f11;
