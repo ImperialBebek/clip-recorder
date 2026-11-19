@@ -175,7 +175,7 @@ pub fn menu() -> Result<()> {
         let _ = slint::quit_event_loop();
     };
     ui.on_save(move || {
-        request_async("save");
+        let _ = ipc::send("save");
         quit();
     });
     ui.on_toggle_pause(|| request_async("toggle-pause"));
@@ -184,7 +184,7 @@ pub fn menu() -> Result<()> {
         quit();
     });
     ui.on_open_folder(move || {
-        request_async("open-folder");
+        let _ = ipc::send("open-folder");
         quit();
     });
     ui.on_settings(move || {
