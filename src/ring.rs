@@ -126,10 +126,6 @@ impl Ring {
         self.video.bytes() + self.audio.bytes()
     }
 
-    pub fn window(&self) -> gst::ClockTime {
-        self.window
-    }
-
     /// Takes effect on the next GOP boundary; no restart needed.
     pub fn set_window(&mut self, window: gst::ClockTime) {
         self.window = window;

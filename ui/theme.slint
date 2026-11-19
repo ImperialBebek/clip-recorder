@@ -1,0 +1,30 @@
+// Open stand-ins for the design's PP Valve (display) and PP Mori (body).
+// The Rust side switches to the PP faces when they are installed.
+import "../assets/fonts/Geist-Regular.ttf";
+import "../assets/fonts/Geist-Medium.ttf";
+import "../assets/fonts/Geist-SemiBold.ttf";
+import "../assets/fonts/GeistMono-Regular.ttf";
+import "../assets/fonts/GeistMono-Medium.ttf";
+import "../assets/fonts/BricolageGrotesque-Medium.ttf";
+
+export global Theme {
+    in-out property <string> display-font: "Bricolage Grotesque";
+    in-out property <string> body-font: "Geist";
+    out property <string> mono-font: "Geist Mono";
+
+    out property <color> bg: #0e0f11;
+    out property <color> sidebar: #121315;
+    out property <color> card: #16171a;
+    out property <color> card-hover: #1c1d21;
+    out property <color> border: #26272c;
+    out property <color> divider: #222327;
+    out property <color> text: #ededee;
+    out property <color> muted: #8b8c92;
+    out property <color> faint: #5d5e64;
+    out property <color> red: #ff3b2f;
+    out property <color> red-dim: #3a1513;
+    out property <color> amber: #f5b33b;
+    out property <color> amber-dim: #3a2c12;
+    out property <color> key-bg: #1d1e22;
+    out property <color> key-border: #3a3b41;
+}

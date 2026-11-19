@@ -1,0 +1,118 @@
+import { Theme } from "theme.slint";
+import { Keys, Icon, RecordMark } from "widgets.slint";
+
+export struct Check {
+    ok: bool,
+    title: string,
+    // `mono` is drawn in Geist Mono, `detail` after it in the body face.
+    mono: string,
+    detail: string,
+    keys: [string],
+}
+
+component Button inherits Rectangle {
+    in property <string> label;
+    in property <bool> primary;
+    callback clicked;
+    height: 36px;
+    width: t.preferred-width + 34px;
+    border-radius: 8px;
+    background: primary ? (ta.has-hover ? #ff5246 : Theme.red) : (ta.has-hover ? Theme.card-hover : transparent);
+    t := Text {
+        text: label;
+        font-family: Theme.body-font;
+        font-size: 13px;
+        font-weight: 600;
+        color: primary ? white : Theme.muted;
+    }
+    ta := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+export { Button }
+
+export component FirstRun inherits Window {
+    in property <[Check]> checks;
+    callback allow();
+    callback later();
+
+    title: "Clip Recorder";
+    width: 640px;
+    height: 560px;
+    background: Theme.bg;
+
+    VerticalLayout {
+        padding: 48px;
+        padding-top: 40px;
+        spacing: 0;
+        HorizontalLayout {
+            alignment: start;
+            RecordMark { }
+        }
+        Rectangle { height: 20px; }
+        Text {
+            text: "Ready in one step";
+            font-family: Theme.display-font;
+            font-size: 28px;
+            font-weight: 500;
+            color: Theme.text;
+        }
+        Rectangle { height: 10px; }
+        Text {
+            text: "We checked your system. Allow screen capture once and the buffer starts in the background.";
+            wrap: word-wrap;
+            font-family: Theme.body-font;
+            font-size: 13px;
+            color: Theme.muted;
+        }
+        Rectangle { height: 24px; }
+        Rectangle {
+            border-radius: 12px;
+            border-width: 1px;
+            border-color: Theme.border;
+            background: Theme.card;
+            clip: true;
+            VerticalLayout {
+                for c[i] in checks: Rectangle {
+                    min-height: 65px;
+                    if i > 0: Rectangle { y: 0; height: 1px; background: Theme.divider; }
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        padding-top: 12px;
+                        padding-bottom: 12px;
+                        spacing: 14px;
+                        Rectangle {
+                            y: 2px;
+                            width: 20px;
+                            height: 20px;
+                            border-radius: 10px;
+                            background: c.ok ? Theme.red-dim : Theme.amber-dim;
+                            if c.ok: Icon { name: "check"; width: 12px; height: 12px; stroke: Theme.red; stroke-width: 1.8px; }
+                            if !c.ok: Text { text: "!"; color: Theme.amber; font-size: 11px; font-weight: 600; font-family: Theme.body-font; }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 3px;
+                            horizontal-stretch: 1;
+                            Text { text: c.title; font-family: Theme.body-font; font-size: 13px; font-weight: 600; color: Theme.text; }
+                            HorizontalLayout {
+                                spacing: 4px;
+                                alignment: start;
+                                if c.mono != "": Text { text: c.mono; font-family: Theme.mono-font; font-size: 12px; color: Theme.text; }
+                                Text { text: c.detail; wrap: word-wrap; horizontal-stretch: 1; font-family: Theme.body-font; font-size: 12px; color: Theme.muted; }
+                            }
+                        }
+                        if c.keys.length > 0: Keys { keys: c.keys; padding-top: 10px; padding-bottom: 10px; }
+                    }
+                }
+            }
+        }
+        Rectangle { vertical-stretch: 1; }
+        HorizontalLayout {
+            alignment: end;
+            spacing: 8px;
+            Button { label: "Later"; clicked => { root.later(); } }
+            Button { label: "Allow screen capture"; primary: true; clicked => { root.allow(); } }
+        }
+    }
+}

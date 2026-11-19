@@ -1,0 +1,184 @@
+import { Theme } from "theme.slint";
+import { Keys, LivePill, BufferBars, Icon } from "widgets.slint";
+
+export struct RecentClip {
+    title: string,
+    length: string,
+    path: string,
+}
+
+component MenuRow inherits Rectangle {
+    in property <string> icon;
+    in property <string> label;
+    in property <string> hint;
+    in property <color> tint: Theme.text;
+    in property <[string]> keys;
+    callback clicked;
+    height: 34px;
+    border-radius: 6px;
+    background: ta.has-hover ? Theme.card-hover : transparent;
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 10px;
+        Icon { name: icon; stroke: tint; y: (parent.height - 16px) / 2; }
+        Text {
+            text: label;
+            vertical-alignment: center;
+            font-family: Theme.body-font;
+            font-size: 13px;
+            font-weight: tint == Theme.red ? 600 : 400;
+            color: tint;
+            horizontal-stretch: 1;
+        }
+        if keys.length > 0: Keys { keys: keys; padding-top: 7px; padding-bottom: 7px; }
+        if hint != "": Text {
+            text: hint;
+            vertical-alignment: center;
+            font-family: Theme.mono-font;
+            font-size: 11px;
+            color: Theme.faint;
+        }
+    }
+    ta := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+component Divider inherits Rectangle {
+    height: 1px;
+    background: Theme.divider;
+}
+
+export component TrayMenu inherits Window {
+    in property <bool> live: true;
+    in property <string> state-label: "Live";
+    in property <string> buffer-text: "00:00 / 01:00";
+    in property <float> fill;
+    in property <string> ram-text;
+    in property <string> encoder-text;
+    in property <int> seconds: 60;
+    in property <[string]> hotkey: ["Alt", "S"];
+    in property <bool> paused;
+    in property <[RecentClip]> recent;
+    in property <string> folder: "~/Videos/Clips";
+    callback save();
+    callback toggle-pause();
+    callback open-clip(string);
+    callback open-folder();
+    callback settings();
+    callback quit();
+    callback dismiss();
+
+    title: "Clip Recorder";
+    width: 312px;
+    no-frame: true;
+    always-on-top: true;
+    background: transparent;
+
+    Rectangle {
+        background: Theme.bg;
+        border-radius: 12px;
+        border-width: 1px;
+        border-color: Theme.border;
+        clip: true;
+        fs := FocusScope {
+            key-pressed(e) => {
+                if e.text == Key.Escape { root.dismiss(); return accept; }
+                reject
+            }
+            VerticalLayout {
+                padding: 6px;
+                spacing: 0;
+                VerticalLayout {
+                    padding: 10px;
+                    padding-top: 12px;
+                    spacing: 10px;
+                    HorizontalLayout {
+                        Text {
+                            text: "Clip Recorder";
+                            font-family: Theme.display-font;
+                            font-size: 20px;
+                            font-weight: 500;
+                            color: Theme.text;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        LivePill { live: root.live; label: root.state-label; }
+                    }
+                    HorizontalLayout {
+                        padding-top: 4px;
+                        Text {
+                            text: "Rolling buffer";
+                            font-family: Theme.body-font;
+                            font-size: 12px;
+                            font-weight: 600;
+                            color: Theme.text;
+                            horizontal-stretch: 1;
+                        }
+                        Text {
+                            text: buffer-text;
+                            font-family: Theme.mono-font;
+                            font-size: 12px;
+                            color: Theme.text;
+                        }
+                    }
+                    BufferBars { fill: root.fill; count: 64; }
+                    HorizontalLayout {
+                        Text { text: ram-text; font-family: Theme.mono-font; font-size: 10px; color: Theme.muted; horizontal-stretch: 1; }
+                        Text { text: encoder-text; font-family: Theme.mono-font; font-size: 10px; color: Theme.muted; }
+                    }
+                }
+                Divider { }
+                VerticalLayout {
+                    padding-top: 4px;
+                    padding-bottom: 4px;
+                    MenuRow {
+                        icon: "record";
+                        label: "Save last \{seconds} s";
+                        tint: root.paused ? Theme.muted : Theme.red;
+                        keys: root.hotkey;
+                        clicked => { root.save(); }
+                    }
+                    MenuRow {
+                        icon: "pause";
+                        label: root.paused ? "Resume buffer" : "Pause buffer";
+                        hint: root.paused ? "" : "frees RAM";
+                        clicked => { root.toggle-pause(); }
+                    }
+                }
+                Divider { }
+                VerticalLayout {
+                    padding-top: 4px;
+                    padding-bottom: 4px;
+                    HorizontalLayout { padding-left: 10px; Text {
+                        text: "RECENT";
+                        font-family: Theme.body-font;
+                        font-size: 10px;
+                        letter-spacing: 1px;
+                        color: Theme.faint;
+                        height: 26px;
+                        vertical-alignment: center;
+                    } }
+                    for c in recent: MenuRow {
+                        icon: "clip";
+                        label: c.title;
+                        hint: c.length;
+                        clicked => { root.open-clip(c.path); }
+                    }
+                    MenuRow {
+                        icon: "folder";
+                        label: "Open clips folder";
+                        hint: root.folder;
+                        clicked => { root.open-folder(); }
+                    }
+                }
+                Divider { }
+                VerticalLayout {
+                    padding-top: 4px;
+                    MenuRow { icon: "sliders"; label: "Settings…"; clicked => { root.settings(); } }
+                    MenuRow { icon: "power"; label: "Quit"; hint: "stops buffer"; clicked => { root.quit(); } }
+                }
+            }
+        }
+    }
+    init => { fs.focus(); }
+}

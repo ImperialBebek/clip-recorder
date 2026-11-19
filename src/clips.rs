@@ -8,7 +8,6 @@ use std::time::SystemTime;
 pub struct Clip {
     pub path: PathBuf,
     pub title: String,
-    pub modified: SystemTime,
     pub seconds: Option<f64>,
 }
 
@@ -75,11 +74,10 @@ pub fn recent(dir: &Path, n: usize) -> Vec<Clip> {
     clips
         .into_iter()
         .take(n)
-        .map(|(modified, path)| Clip {
+        .map(|(_, path)| Clip {
             title: title_of(&path.file_stem().unwrap_or_default().to_string_lossy()),
             seconds: mp4_seconds(&path),
             path,
-            modified,
         })
         .collect()
 }
