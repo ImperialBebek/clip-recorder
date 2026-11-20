@@ -210,7 +210,17 @@ pub fn restart(exe: &Path) {
         std::thread::sleep(Duration::from_millis(100));
     }
     let args = if args.is_empty() { vec!["run"] } else { args };
-    if let Ok(mut child) = Command::new(exe).args(&args).spawn() {
+    // Own process group and no terminal, so closing the terminal that ran
+    // `clip-recorder update` doesn't take the new recorder down with it.
+    use std::os::unix::process::CommandExt;
+    let spawned = Command::new(exe)
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn();
+    if let Ok(mut child) = spawned {
         std::thread::spawn(move || child.wait());
         // Give it a moment to bind the socket before this process exits.
         std::thread::sleep(Duration::from_millis(500));
