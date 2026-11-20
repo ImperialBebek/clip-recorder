@@ -200,10 +200,7 @@ impl Daemon {
             ("saving", self.saving.load(Ordering::SeqCst).to_string()),
             ("version", env!("CARGO_PKG_VERSION").into()),
             ("update", self.update.clone().unwrap_or_default()),
-            (
-                "args",
-                std::env::args().skip(1).collect::<Vec<_>>().join("\t"),
-            ),
+            ("args", launch_args()),
             ("unit", systemd_unit().unwrap_or_default()),
         ];
         lines
@@ -334,6 +331,17 @@ impl Drop for Osd {
             std::thread::spawn(move || child.wait());
         }
     }
+}
+
+/// This process's arguments, tab-separated, for the updater to relaunch with.
+/// Empty when one can't survive that trip (not UTF-8, or has a tab or newline),
+/// so the updater falls back to a plain `run`.
+fn launch_args() -> String {
+    let args: Option<Vec<String>> = std::env::args_os()
+        .skip(1)
+        .map(|a| a.into_string().ok().filter(|a| !a.contains(['\t', '\n'])))
+        .collect();
+    args.map(|a| a.join("\t")).unwrap_or_default()
 }
 
 /// The systemd user unit running this process, e.g. `clip-recorder.service`.
