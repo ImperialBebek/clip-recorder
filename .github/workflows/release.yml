@@ -21,7 +21,10 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pkg-config \
+          # The runner image ships libunwind-14-dev, which conflicts with
+          # libunwind-dev that libgstreamer1.0-dev needs.
+          sudo apt-get remove -y libunwind-14-dev || true
+          sudo apt-get install -y --no-install-recommends pkg-config libunwind-dev \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             libfontconfig1-dev libxkbcommon-dev
       - uses: dtolnay/rust-toolchain@stable
