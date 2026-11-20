@@ -19,6 +19,8 @@ ashpd = { version = "0.14", default-features = false, features = ["tokio", "scre
 evdev = "0.13"
 libc = "0.2"
 smithay-client-toolkit = { version = "0.19", default-features = false }
+wayland-client = "0.31"
+wayland-protocols-plasma = { version = "0.3", features = ["client"] }
 ksni = { version = "0.3", default-features = false, features = ["tokio"] }
 slint = { version = "1.19", default-features = false, features = ["std", "compat-1-2", "backend-winit-wayland", "backend-winit-x11", "renderer-femtovg", "renderer-software", "software-renderer-systemfonts", "unstable-winit-030"] }
 

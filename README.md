@@ -62,8 +62,12 @@ cargo build --release
 install -Dm755 target/release/clip-recorder ~/.local/bin/clip-recorder
 install -Dm644 assets/clip-recorder.desktop ~/.local/share/applications/clip-recorder.desktop
 # start it with your session:
-install -Dm644 assets/clip-recorder.desktop ~/.config/autostart/clip-recorder.desktop
+sed 's|^Exec=.*|Exec=clip-recorder --background|' assets/clip-recorder.desktop > ~/.config/autostart/clip-recorder.desktop
 ```
+
+### First start
+
+The first time it starts, the library opens with a short welcome card: how it spots your game, what Alt+S does and that it keeps running from the tray. After you dismiss it, starting the app by hand (app menu) opens the library, or just raises it if the recorder is already running. Autostart at login (`--background`) goes straight to the tray without a window.
 
 ### Hotkey
 
@@ -83,7 +87,7 @@ Or skip both: run with `--no-hotkey` and bind `clip-recorder save` to a key in y
 clip-recorder
 ```
 
-The first run shows the portal's screen picker. The choice is remembered, so later runs start straight away (`--reselect` shows it again). Press **Alt+S** and the last 60 seconds land in `~/Videos/Clips/<Game>_<date>_<time>.mp4` with a toast in the corner. When a game starts, a toast names it and reminds you to press Alt+S (turn it off with `toast = false`); there is nothing to pick first. The game name comes from Steam (`SteamAppId`, Proton included), Lutris or Heroic; otherwise clips are named `clip_...`.
+On KDE Plasma there is nothing to pick at all: the recorder asks KWin for the game's own window (found by its Steam, Lutris, Heroic or Wine marker), records that window while the game runs, and goes idle when it closes, so every clip is just the game, with a fresh buffer per game. Set `capture = screen` (or pass `--reselect`) to record a whole screen instead. Elsewhere (GNOME, Hyprland, Sway, ...) the portal is used, as follows. The first run shows the portal's screen picker, after a toast that says what it is for. Pick the monitor your games run on (windows aren't offered, since they'd vanish when a game restarts). The choice is remembered, so every later start, including autostart at login, records straight away. If a game is already running on a first run, the picker waits until it has closed instead of appearing on top of it. If you cancel, or the desktop forgets the choice, the tray icon turns into a warning and its menu offers **Choose screen…**; the library's state pill and its settings popover (**Change screen…**) do the same, as does `clip-recorder reselect` (`--reselect` at startup). Press **Alt+S** and the last 60 seconds land in `~/Videos/Clips/<Game>_<date>_<time>.mp4` with a toast in the corner. When a game starts and the buffer is really recording, a toast names it and reminds you to press Alt+S; if it isn't recording (no screen chosen, encoder failed), the toast says so instead (turn it off with `toast = false`); there is nothing to pick first. The game name comes from Steam (`SteamAppId`, Proton included), Lutris or Heroic; otherwise clips are named `clip_...`.
 
 Left-click the tray icon to open the library; its menu has Save clip, Open library and Quit. Without a tray (GNOME without the AppIndicator extension), run `clip-recorder library`.
 
@@ -93,6 +97,7 @@ To delete clips, click the check button in the library header, or just hold **Ct
 clip-recorder [run] [OPTIONS]   start recording (tray icon, Alt+S to save)
 clip-recorder save              save a clip from the running recorder
 clip-recorder pause|resume      pause or resume the buffer (pausing frees its RAM)
+clip-recorder reselect          choose the screen to record again
 clip-recorder status            print the recorder's state
 clip-recorder library           open the clips window
 clip-recorder quit              stop the running recorder
@@ -106,6 +111,7 @@ clip-recorder quit              stop the running recorder
 -k, --hotkey <COMBO>      global save hotkey                  [default: alt+s]
     --no-hotkey           only save via `clip-recorder save` or SIGUSR1
     --headless            no tray or toasts
+    --background          stay in the tray; without it the library opens (autostart uses it)
     --reselect            show the screen picker again
     --test-source         record a test pattern and tone instead of the screen
 ```
@@ -122,6 +128,7 @@ fps = 60
 quality = high            # light 12 Mb/s, high 25 Mb/s, max 50 Mb/s
 encoder = auto
 audio = auto
+capture = auto            # auto: the game's window on KDE, else a portal screen (read at startup); screen: always a screen
 output = ~/Videos/Clips
 hotkey = alt+s            # read at startup
 pause_without_game = false
@@ -130,7 +137,7 @@ sound = true              # chime when a clip is saved
 check_updates = true      # daily release check
 ```
 
-RAM use is roughly `bitrate × duration`: 25 Mbit/s for 60 s is about 190 MB. "Pause when no game is running" stops the encoder and frees the buffer while no Steam, Lutris, Heroic, Wine or gamescope game is running.
+RAM use is roughly `bitrate × duration`: 25 Mbit/s for 60 s is about 190 MB. "Pause when no game is running" (portal capture only; the KDE window capture always idles between games) stops the encoder and frees the buffer while no Steam, Lutris, Heroic, Wine or gamescope game is running.
 
 ### Fonts
 
@@ -147,7 +154,7 @@ PartOf=graphical-session.target
 After=graphical-session.target
 
 [Service]
-ExecStart=%h/.local/bin/clip-recorder
+ExecStart=%h/.local/bin/clip-recorder --background
 Restart=on-failure
 
 [Install]

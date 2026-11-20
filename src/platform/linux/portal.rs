@@ -17,8 +17,28 @@ fn token_path() -> PathBuf {
     super::state_dir().join("restore_token")
 }
 
+/// Whether a screen was picked before, so `open(false)` restores it without
+/// showing the picker (unless the desktop has revoked it).
+pub fn has_token() -> bool {
+    std::fs::read_to_string(token_path()).is_ok_and(|t| !t.trim().is_empty())
+}
+
+/// The user closed the picker without choosing a screen.
+#[derive(Debug)]
+pub struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("screen selection was cancelled")
+    }
+}
+
+impl std::error::Error for Cancelled {}
+
 /// Asks the desktop portal for a screen. The choice is remembered with a
 /// restore token, so the picker only shows on first run (or with --reselect).
+/// Only monitors are offered: a window would vanish when the game restarts
+/// and the token would be worthless for the next game.
 pub async fn open(reselect: bool) -> Result<PortalStream> {
     let proxy = Screencast::new()
         .await
@@ -32,18 +52,12 @@ pub async fn open(reselect: bool) -> Result<PortalStream> {
     };
 
     let session = proxy.create_session(Default::default()).await?;
-    let wanted = SourceType::MONITOR | SourceType::WINDOW;
-    let sources = proxy
-        .available_source_types()
-        .await
-        .map(|a| a & wanted)
-        .unwrap_or(SourceType::MONITOR);
     proxy
         .select_sources(
             &session,
             SelectSourcesOptions::default()
                 .set_cursor_mode(CursorMode::EMBEDDED)
-                .set_sources(sources)
+                .set_sources(SourceType::MONITOR)
                 .set_multiple(false)
                 .set_restore_token(token.as_deref().filter(|t| !t.is_empty()))
                 .set_persist_mode(PersistMode::ExplicitlyRevoked),
@@ -54,7 +68,12 @@ pub async fn open(reselect: bool) -> Result<PortalStream> {
         .start(&session, None, Default::default())
         .await?
         .response()
-        .context("screen selection was cancelled")?;
+        .map_err(|e| match e {
+            ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled) => {
+                anyhow::Error::new(Cancelled)
+            }
+            e => anyhow::Error::new(e).context("screen selection failed"),
+        })?;
     let Some(stream) = streams.streams().first() else {
         bail!("portal returned no stream");
     };

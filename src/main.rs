@@ -29,6 +29,7 @@ USAGE:
     clip-recorder [run] [OPTIONS]   start recording (tray icon, Alt+S to save)
     clip-recorder save              save a clip from the running recorder
     clip-recorder pause|resume      pause or resume the buffer (pausing frees its RAM)
+    clip-recorder reselect          choose the screen to record again
     clip-recorder status            print the recorder's state
     clip-recorder library           open the clips window
     clip-recorder update [--check]  install the latest release (or only check for one)
@@ -45,6 +46,8 @@ OPTIONS (override ~/.config/clip-recorder/config for this run):
     -k, --hotkey <COMBO>      global save hotkey                  [default: alt+s]
         --no-hotkey           only save via `clip-recorder save` or SIGUSR1
         --headless            no tray or toasts
+        --background          start quietly in the tray (what autostart uses); otherwise the
+                              library opens, and onboarding shows on the very first start
         --reselect            show the screen picker again
         --test-source         record a test pattern and tone instead of the screen
     -h, --help                print this help
@@ -66,6 +69,7 @@ fn parse_args() -> Result<Cmd> {
         kbps: None,
         hotkey: true,
         reselect: false,
+        background: false,
         test_source: false,
         ui: true,
     };
@@ -81,6 +85,7 @@ fn parse_args() -> Result<Cmd> {
                     "pause" => return Ok(Cmd::Client("pause")),
                     "resume" => return Ok(Cmd::Client("resume")),
                     "status" => return Ok(Cmd::Client("status")),
+                    "reselect" => return Ok(Cmd::Client("reselect")),
                     "quit" => return Ok(Cmd::Client("quit")),
                     "library" => return Ok(Cmd::Window("library")),
                     "update" => {
@@ -112,6 +117,7 @@ fn parse_args() -> Result<Cmd> {
             Long("no-hotkey") => flags.hotkey = false,
             Long("headless") | Long("no-notify") => flags.ui = false,
             Long("reselect") => flags.reselect = true,
+            Long("background") => flags.background = true,
             Long("test-source") => flags.test_source = true,
             Short('h') | Long("help") => return Ok(Cmd::Help),
             Short('V') | Long("version") => return Ok(Cmd::Version),
@@ -189,6 +195,15 @@ fn main() -> ExitCode {
             "osd" => toast::run(),
             _ => ui::library(),
         },
+        // Started again while recording: bring up the library instead of failing,
+        // so the app menu entry always does something.
+        Ok(Cmd::Run(_, flags)) if ipc::status().is_ok() => {
+            if flags.background {
+                Ok(())
+            } else {
+                ui::library()
+            }
+        }
         Ok(Cmd::Run(cfg, flags)) => tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

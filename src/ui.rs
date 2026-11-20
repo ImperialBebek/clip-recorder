@@ -265,6 +265,23 @@ fn thumb_worker(ui: slint::Weak<Library>) -> std::sync::mpsc::Sender<PathBuf> {
     tx
 }
 
+fn onboarded_marker() -> PathBuf {
+    crate::platform::state_dir().join("onboarded")
+}
+
+/// Whether the welcome screen was seen (dismissed) before.
+pub fn onboarded() -> bool {
+    onboarded_marker().exists()
+}
+
+fn set_onboarded() {
+    let p = onboarded_marker();
+    if let Some(dir) = p.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(p, "");
+}
+
 /// Only one library window: a second `clip-recorder library` raises the first.
 fn single_instance(ui: slint::Weak<Library>) -> Option<std::os::unix::net::UnixListener> {
     use std::os::linux::net::SocketAddrExt;
@@ -293,6 +310,16 @@ fn single_instance(ui: slint::Weak<Library>) -> Option<std::os::unix::net::UnixL
             let _ = UnixStream::connect_addr(&addr);
             None
         }
+    }
+}
+
+/// `text` cut to at most `max` characters, with an ellipsis when it was longer.
+fn shorten(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_owned()
+    } else {
+        let head: String = text.chars().take(max - 1).collect();
+        format!("{}…", head.trim_end())
     }
 }
 
@@ -340,11 +367,18 @@ pub fn library() -> Result<()> {
                 ),
             };
             let (live, label) = match s.as_ref().map(|s| get(s, "state")) {
-                Some("live") => (true, format!("Buffering · {window} s")),
-                Some("idle") => (false, "Idle · no game".to_owned()),
+                Some("live") => {
+                    let game = s.as_ref().map_or("", |s| get(s, "game"));
+                    let what = if game.is_empty() { "screen" } else { game };
+                    (true, format!("Recording · {}", shorten(what, 26)))
+                }
+                Some("idle") => (false, "Waiting for a game".to_owned()),
                 Some("paused") => (false, "Paused".to_owned()),
+                Some("setup") => (false, "Choose a screen".to_owned()),
+                Some("error") => (false, "Not recording".to_owned()),
                 _ => (false, "Stopped · start".to_owned()),
             };
+            ui.set_screen_picker(s.as_ref().is_none_or(|s| get(s, "capture") != "game"));
             ui.set_live(live);
             ui.set_state_label(label.into());
             ui.set_seconds(window as i32);
@@ -533,6 +567,7 @@ pub fn library() -> Result<()> {
             refresh();
         });
     }
+    ui.on_change_screen(|| request_async("reselect"));
     ui.on_set_quality(|i| {
         if let Some(&q) = QUALITY.get(i as usize) {
             change("quality", move |c| c.quality = q);
@@ -545,8 +580,13 @@ pub fn library() -> Result<()> {
     });
     // Paused or idle: resume the running recorder; stopped: start one.
     ui.on_start_recorder(|| {
-        if ipc::status().is_ok() {
-            request_async("resume");
+        if let Ok(s) = ipc::status() {
+            // Nothing to resume without a screen: open the picker instead.
+            request_async(if get(&s, "state") == "setup" {
+                "reselect"
+            } else {
+                "resume"
+            });
         } else {
             spawn_detached(&["run"]);
         }
@@ -561,9 +601,26 @@ pub fn library() -> Result<()> {
             }
         });
     }
-    ui.on_close_window(|| {
-        let _ = slint::quit_event_loop();
-    });
+    ui.set_onboarding(!onboarded());
+    {
+        let weak = ui.as_weak();
+        ui.on_finish_onboarding(move || {
+            set_onboarded();
+            if let Some(ui) = weak.upgrade() {
+                ui.set_onboarding(false);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_close_window(move || {
+            // Closing the window also counts as having read the welcome screen.
+            if weak.upgrade().is_some_and(|ui| ui.get_onboarding()) {
+                set_onboarded();
+            }
+            let _ = slint::quit_event_loop();
+        });
+    }
     ui.run()?;
     Ok(())
 }
@@ -571,6 +628,14 @@ pub fn library() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_names_are_shortened() {
+        assert_eq!(shorten("Deadlock", 26), "Deadlock");
+        let long = shorten("The Witcher 3: Wild Hunt - Game of the Year Edition", 26);
+        assert!(long.chars().count() <= 26);
+        assert!(long.ends_with('…'));
+    }
 
     fn grid() -> Grid {
         // 3 columns of 100x60 cards, 10 px apart, 7 cards.

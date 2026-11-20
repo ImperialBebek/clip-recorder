@@ -1,5 +1,6 @@
 pub mod hotkey;
 pub mod ipc;
+pub mod kwin;
 pub mod portal;
 pub mod shortcuts;
 pub mod tray;
@@ -14,24 +15,27 @@ use crate::gst_util::make;
 
 /// A screen stream handed out by the ScreenCast portal as a PipeWire node.
 pub struct Screen {
-    pub fd: i32,
+    /// The portal's PipeWire connection; `None` for the default one.
+    pub fd: Option<i32>,
     pub node: u32,
 }
 
 impl Screen {
     pub fn element(&self) -> Result<gst::Element> {
-        make(
-            "pipewiresrc",
-            &[
-                ("fd", &self.fd.to_string()),
-                ("path", &self.node.to_string()),
-                ("do-timestamp", "true"),
-                // Compositors only send frames on damage; resend the last one
-                // so a static screen still produces keyframes.
-                ("keepalive-time", "1000"),
-                ("always-copy", "false"),
-            ],
-        )
+        let fd = self.fd.map(|fd| fd.to_string());
+        let node = self.node.to_string();
+        let mut props: Vec<(&str, &str)> = vec![
+            ("path", &node),
+            ("do-timestamp", "true"),
+            // Compositors only send frames on damage; resend the last one
+            // so a static screen still produces keyframes.
+            ("keepalive-time", "1000"),
+            ("always-copy", "false"),
+        ];
+        if let Some(fd) = &fd {
+            props.push(("fd", fd));
+        }
+        make("pipewiresrc", &props)
     }
 }
 

@@ -51,6 +51,8 @@ enum Event {
     Failed(String),
     /// A game started: its name and the save hotkey.
     Game(String, String),
+    /// A heads-up with a heading and detail; the flag marks a problem.
+    Notice(bool, String, String),
 }
 
 fn parse(line: &str) -> Option<Event> {
@@ -64,6 +66,11 @@ fn parse(line: &str) -> Option<Event> {
         ),
         "failed" => Event::Failed(f[0].to_owned()),
         "game" => Event::Game(f[0].to_owned(), f.get(1).unwrap_or(&"").to_string()),
+        "info" | "warn" => Event::Notice(
+            kind == "warn",
+            f[0].to_owned(),
+            f.get(1).unwrap_or(&"").to_string(),
+        ),
         _ => return None, // "saving": nothing shows while saving
     })
 }
@@ -85,6 +92,12 @@ fn describe(ev: &Event) -> (i32, String, String, f32) {
             (1, format!("Saved {secs} s"), detail, 2.4)
         }
         Event::Failed(reason) => (2, "Couldn't save".into(), reason.clone(), 6.0),
+        Event::Notice(warn, heading, detail) => (
+            if *warn { 2 } else { 3 },
+            heading.clone(),
+            detail.clone(),
+            6.0,
+        ),
         Event::Game(name, hotkey) => (
             3,
             name.clone(),
@@ -377,7 +390,9 @@ impl Wl {
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         // An empty input region: clicks go to the game underneath.
         if let Ok(region) = smithay_client_toolkit::compositor::Region::new(&self.compositor) {
-            layer.wl_surface().set_input_region(Some(region.wl_region()));
+            layer
+                .wl_surface()
+                .set_input_region(Some(region.wl_region()));
         }
         layer.commit();
         self.layer = Some(layer);
@@ -401,14 +416,7 @@ impl CompositorHandler for Wl {
         _: wl_output::Transform,
     ) {
     }
-    fn frame(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface,
-        _: u32,
-    ) {
-    }
+    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {}
     fn surface_enter(
         &mut self,
         _: &Connection,

@@ -53,6 +53,32 @@ component SettingRow inherits VerticalLayout {
     @children
 }
 
+component Step inherits HorizontalLayout {
+    in property <string> num;
+    in property <string> title;
+    in property <string> body;
+    spacing: 14px;
+    Rectangle {
+        y: 0;
+        width: 26px;
+        height: 26px;
+        border-radius: 13px;
+        background: Theme.red-dim;
+        Text { text: num; color: Theme.red; font-family: Theme.mono-font; font-size: 12px; font-weight: 600; }
+    }
+    VerticalLayout {
+        horizontal-stretch: 1;
+        spacing: 4px;
+        HorizontalLayout {
+            alignment: start;
+            spacing: 8px;
+            Text { text: title; vertical-alignment: center; font-family: Theme.body-font; font-size: 14px; font-weight: 600; color: Theme.text; }
+            @children
+        }
+        Text { text: body; wrap: word-wrap; font-family: Theme.body-font; font-size: 12px; color: Theme.muted; }
+    }
+}
+
 component TextButton inherits Rectangle {
     in property <string> label;
     in property <bool> danger;
@@ -189,6 +215,12 @@ export component Library inherits Window {
     callback set-quality(int);
     callback set-duration(int);
     callback start-recorder();
+    callback change-screen();
+    // First start: a welcome card over the library explaining how the app works.
+    in-out property <bool> onboarding;
+    callback finish-onboarding();
+    // False when the recorder follows the game window and there is no screen to pick.
+    in property <bool> screen-picker: true;
     callback drag();
     callback close-window();
 
@@ -385,6 +417,54 @@ export component Library inherits Window {
             }
         }
 
+        if root.onboarding: Rectangle {
+            background: #000000b8;
+            TouchArea { }
+            Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: max(16px, (parent.height - self.height) / 2);
+                width: min(460px, parent.width - 32px);
+                height: ob.preferred-height;
+                background: Theme.card;
+                border-radius: 14px;
+                border-width: 1px;
+                border-color: Theme.border;
+                drop-shadow-blur: 32px;
+                drop-shadow-color: #000000a0;
+                ob := VerticalLayout {
+                    padding: 28px;
+                    spacing: 20px;
+                    VerticalLayout {
+                        spacing: 4px;
+                        Text { text: "Welcome to Clip Recorder"; font-family: Theme.body-font; font-size: 20px; font-weight: 600; color: Theme.text; }
+                        Text { text: "Instant replay for your games, with nothing to set up."; wrap: word-wrap; font-family: Theme.body-font; font-size: 13px; color: Theme.muted; }
+                    }
+                    Step {
+                        num: "1";
+                        title: root.screen-picker ? "Pick your screen once" : "Just play";
+                        body: root.screen-picker
+                            ? "Choose the screen your games run on when asked. After that it keeps the last " + root.seconds + " s of it in memory. Nothing is written to disk until you save."
+                            : "Clip Recorder spots your game on its own and keeps the last " + root.seconds + " s of it in memory. Nothing is written to disk until you save.";
+                    }
+                    Step {
+                        num: "2";
+                        title: "Save a clip with";
+                        body: "The last " + root.seconds + " s become an MP4 and appear here in the library. A toast confirms it, even over a fullscreen game.";
+                        Keys { keys: root.hotkey; }
+                    }
+                    Step {
+                        num: "3";
+                        title: "It lives in the tray";
+                        body: "Closing this window doesn't stop recording. Click the tray icon to come back, or choose Quit from its menu to stop.";
+                    }
+                    HorizontalLayout {
+                        alignment: end;
+                        TextButton { height: 32px; danger: true; label: "Got it"; clicked => { root.finish-onboarding(); } }
+                    }
+                }
+            }
+        }
+
         if popover: TouchArea { clicked => { root.popover = false; } }
         if popover: Rectangle {
             x: parent.width - self.width - 52px;
@@ -410,6 +490,11 @@ export component Library inherits Window {
                     title: "Duration";
                     note: root.duration-note;
                     Segmented { mono: true; options: ["30 s", "60 s", "120 s"]; selected: root.duration; picked(i) => { root.set-duration(i); } }
+                }
+                if root.screen-picker: SettingRow {
+                    title: "Screen";
+                    note: "the one a game runs on";
+                    TextButton { height: 28px; label: "Change screen…"; clicked => { root.popover = false; root.change-screen(); } }
                 }
                 Rectangle { height: 1px; background: Theme.divider; }
                 Text {
