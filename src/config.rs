@@ -40,6 +40,32 @@ impl Quality {
     }
 }
 
+/// What the recorder captures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Capture {
+    /// The game's own window where the desktop allows it (KDE Plasma), else
+    /// the screen picked once through the portal.
+    Auto,
+    /// Always the screen picked through the portal.
+    Screen,
+}
+
+impl Capture {
+    pub fn name(self) -> &'static str {
+        match self {
+            Capture::Auto => "auto",
+            Capture::Screen => "screen",
+        }
+    }
+    fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "auto" => Capture::Auto,
+            "screen" => Capture::Screen,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     pub duration: u32,
@@ -47,6 +73,8 @@ pub struct Config {
     pub quality: Quality,
     pub encoder: Option<Encoder>,
     pub audio: AudioSource,
+    /// Read at startup.
+    pub capture: Capture,
     pub output: PathBuf,
     pub hotkey: String,
     pub pause_without_game: bool,
@@ -64,11 +92,12 @@ impl Default for Config {
             quality: Quality::High,
             encoder: None,
             audio: AudioSource::Auto,
+            capture: Capture::Auto,
             output: crate::home().join("Videos").join("Clips"),
             hotkey: "alt+s".into(),
             pause_without_game: false,
             toast: true,
-            sound: false,
+            sound: true,
             check_updates: true,
         }
     }
@@ -113,6 +142,7 @@ impl Config {
                 "quality" => c.quality = Quality::parse(v).unwrap_or(c.quality),
                 "encoder" => c.encoder = Encoder::parse(v).unwrap_or(c.encoder),
                 "audio" => c.audio = AudioSource::parse(v).unwrap_or(c.audio),
+                "capture" => c.capture = Capture::parse(v).unwrap_or(c.capture),
                 "output" if !v.is_empty() => c.output = expand(v),
                 "hotkey" if !v.is_empty() => c.hotkey = v.to_owned(),
                 "pause_without_game" => {
@@ -131,12 +161,13 @@ impl Config {
         let p = path();
         std::fs::create_dir_all(p.parent().unwrap())?;
         let text = format!(
-            "duration = {}\nfps = {}\nquality = {}\nencoder = {}\naudio = {}\noutput = {}\nhotkey = {}\npause_without_game = {}\ntoast = {}\nsound = {}\ncheck_updates = {}\n",
+            "duration = {}\nfps = {}\nquality = {}\nencoder = {}\naudio = {}\ncapture = {}\noutput = {}\nhotkey = {}\npause_without_game = {}\ntoast = {}\nsound = {}\ncheck_updates = {}\n",
             self.duration,
             self.fps,
             self.quality.name(),
             self.encoder.map_or("auto", |e| e.name()),
             self.audio.name(),
+            self.capture.name(),
             self.output.display(),
             self.hotkey,
             self.pause_without_game,

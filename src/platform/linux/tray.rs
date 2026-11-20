@@ -16,6 +16,12 @@ pub struct Tray {
     pub hotkey: String,
     /// A newer release, when one is out.
     pub update: Option<String>,
+    /// No screen chosen yet: nothing is being recorded.
+    pub setup: bool,
+    /// Following the game's window and no game is running.
+    pub waiting: bool,
+    /// The screen can be chosen (portal capture, not the game's window).
+    pub pick: bool,
 }
 
 fn send(t: &Tray, cmd: &str) {
@@ -43,7 +49,9 @@ impl ksni::Tray for Tray {
         "Clip Recorder".into()
     }
     fn icon_name(&self) -> String {
-        if self.paused {
+        if self.setup {
+            "dialog-warning".into()
+        } else if self.paused {
             "media-playback-pause".into()
         } else {
             "media-record".into()
@@ -52,7 +60,11 @@ impl ksni::Tray for Tray {
     fn tool_tip(&self) -> ksni::ToolTip {
         ksni::ToolTip {
             title: "Clip Recorder".into(),
-            description: if self.paused {
+            description: if self.setup {
+                "Needs setup: choose a screen".into()
+            } else if self.waiting {
+                "Waiting for a game".into()
+            } else if self.paused {
                 "Buffer paused".into()
             } else {
                 format!("Live · {} s buffer", self.seconds)
@@ -64,11 +76,24 @@ impl ksni::Tray for Tray {
         open_window("library");
     }
     fn menu(&self) -> Vec<MenuItem<Self>> {
-        let mut items = vec![
+        let screen = |label: &str| -> MenuItem<Self> {
+            StandardItem {
+                label: label.into(),
+                icon_name: "video-display".into(),
+                activate: Box::new(|t: &mut Self| send(t, "reselect")),
+                ..Default::default()
+            }
+            .into()
+        };
+        let mut items = Vec::new();
+        if self.setup {
+            items.push(screen("Choose screen…"));
+        }
+        items.extend([
             StandardItem {
                 label: "Save clip".into(),
                 icon_name: "media-record".into(),
-                enabled: !self.paused,
+                enabled: !self.paused && !self.setup && !self.waiting,
                 shortcut: vec![self.hotkey.split('+').map(str::to_owned).collect()],
                 activate: Box::new(|t: &mut Self| send(t, "save")),
                 ..Default::default()
@@ -82,7 +107,10 @@ impl ksni::Tray for Tray {
             }
             .into(),
             MenuItem::Separator,
-        ];
+        ]);
+        if self.pick && !self.setup {
+            items.insert(2, screen("Change screen…"));
+        }
         if let Some(v) = &self.update {
             items.push(
                 StandardItem {

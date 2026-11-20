@@ -18,10 +18,10 @@ fi
 
 "$bin/clip-recorder" quit 2>/dev/null || true
 install -Dm755 "$here/clip-recorder" "$bin/clip-recorder"
-for dir in "$apps" "$autostart"; do
-    mkdir -p "$dir"
-    sed "s|^Exec=.*|Exec=$bin/clip-recorder|" "$here/clip-recorder.desktop" > "$dir/clip-recorder.desktop"
-done
+# The menu entry opens the library; the autostart entry stays in the tray.
+mkdir -p "$apps" "$autostart"
+sed "s|^Exec=.*|Exec=$bin/clip-recorder|" "$here/clip-recorder.desktop" > "$apps/clip-recorder.desktop"
+sed "s|^Exec=.*|Exec=$bin/clip-recorder --background|" "$here/clip-recorder.desktop" > "$autostart/clip-recorder.desktop"
 
 missing=""
 if ! command -v gst-inspect-1.0 >/dev/null 2>&1; then

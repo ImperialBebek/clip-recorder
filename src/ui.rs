@@ -1,14 +1,13 @@
-//! The windows: the clips library and the save toast. Each runs as its own
-//! short-lived process (`clip-recorder library`, `osd`) and talks to the
+//! The windows: the clips library window. Each runs as its own
+//! short-lived process (`clip-recorder library`) and talks to the
 //! recorder over the control socket, so the recorder never loads a GUI.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use gstreamer as gst;
@@ -49,6 +48,71 @@ fn request_async(cmd: &'static str) {
             eprintln!("{cmd}: {e:#}");
         }
     });
+}
+
+/// Recounts the selected cards; no selection means nothing left to confirm.
+fn sync_selection(ui: &Library) {
+    let n = ui.get_clips().iter().filter(|c| c.selected).count();
+    ui.set_selected_count(n as i32);
+    if n == 0 {
+        ui.set_confirming(false);
+    }
+}
+
+/// Left edge of the card grid, matching the 24 px padding in `library.slint`.
+const GRID_PAD: f32 = 24.0;
+
+/// Grid geometry in logical pixels, as laid out in `library.slint`.
+#[derive(Clone, Copy)]
+struct Grid {
+    card_w: f32,
+    card_h: f32,
+    gap: f32,
+    cols: usize,
+    count: usize,
+}
+
+impl Grid {
+    /// The card under a point, if the point is on a card and not in a gap.
+    fn hit(&self, x: f32, y: f32) -> Option<usize> {
+        let (cx, cy) = (x - GRID_PAD, y);
+        if cx < 0.0 || cy < 0.0 {
+            return None;
+        }
+        let (col, row) = (
+            (cx / (self.card_w + self.gap)) as usize,
+            (cy / (self.card_h + self.gap)) as usize,
+        );
+        let in_card = cx - col as f32 * (self.card_w + self.gap) <= self.card_w
+            && cy - row as f32 * (self.card_h + self.gap) <= self.card_h;
+        let i = row * self.cols + col;
+        (col < self.cols && in_card && i < self.count).then_some(i)
+    }
+
+    /// Every card a rectangle (x0, y0)-(x1, y1) touches.
+    fn band(&self, x0: f32, y0: f32, x1: f32, y1: f32) -> Vec<usize> {
+        (0..self.count)
+            .filter(|&i| {
+                let left = GRID_PAD + (i % self.cols) as f32 * (self.card_w + self.gap);
+                let top = (i / self.cols) as f32 * (self.card_h + self.gap);
+                left < x1 && left + self.card_w > x0 && top < y1 && top + self.card_h > y0
+            })
+            .collect()
+    }
+}
+
+/// Sets `selected` on every card with `f(index, was_selected)`.
+fn map_selection(ui: &Library, f: impl Fn(usize, bool) -> bool) {
+    let model = ui.get_clips();
+    for i in 0..model.row_count() {
+        let mut c = model.row_data(i).unwrap();
+        let on = f(i, c.selected);
+        if on != c.selected {
+            c.selected = on;
+            model.set_row_data(i, c);
+        }
+    }
+    sync_selection(ui);
 }
 
 const QUALITY: [Quality; 3] = [Quality::Light, Quality::High, Quality::Max];
@@ -201,6 +265,23 @@ fn thumb_worker(ui: slint::Weak<Library>) -> std::sync::mpsc::Sender<PathBuf> {
     tx
 }
 
+fn onboarded_marker() -> PathBuf {
+    crate::platform::state_dir().join("onboarded")
+}
+
+/// Whether the welcome screen was seen (dismissed) before.
+pub fn onboarded() -> bool {
+    onboarded_marker().exists()
+}
+
+fn set_onboarded() {
+    let p = onboarded_marker();
+    if let Some(dir) = p.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(p, "");
+}
+
 /// Only one library window: a second `clip-recorder library` raises the first.
 fn single_instance(ui: slint::Weak<Library>) -> Option<std::os::unix::net::UnixListener> {
     use std::os::linux::net::SocketAddrExt;
@@ -229,6 +310,16 @@ fn single_instance(ui: slint::Weak<Library>) -> Option<std::os::unix::net::UnixL
             let _ = UnixStream::connect_addr(&addr);
             None
         }
+    }
+}
+
+/// `text` cut to at most `max` characters, with an ellipsis when it was longer.
+fn shorten(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_owned()
+    } else {
+        let head: String = text.chars().take(max - 1).collect();
+        format!("{}…", head.trim_end())
     }
 }
 
@@ -276,11 +367,18 @@ pub fn library() -> Result<()> {
                 ),
             };
             let (live, label) = match s.as_ref().map(|s| get(s, "state")) {
-                Some("live") => (true, format!("Buffering · {window} s")),
-                Some("idle") => (false, "Idle · no game".to_owned()),
+                Some("live") => {
+                    let game = s.as_ref().map_or("", |s| get(s, "game"));
+                    let what = if game.is_empty() { "screen" } else { game };
+                    (true, format!("Recording · {}", shorten(what, 26)))
+                }
+                Some("idle") => (false, "Waiting for a game".to_owned()),
                 Some("paused") => (false, "Paused".to_owned()),
+                Some("setup") => (false, "Choose a screen".to_owned()),
+                Some("error") => (false, "Not recording".to_owned()),
                 _ => (false, "Stopped · start".to_owned()),
             };
+            ui.set_screen_picker(s.as_ref().is_none_or(|s| get(s, "capture") != "game"));
             ui.set_live(live);
             ui.set_state_label(label.into());
             ui.set_seconds(window as i32);
@@ -316,6 +414,7 @@ pub fn library() -> Result<()> {
                 .into_iter()
                 .map(|c| {
                     let path = c.path.display().to_string();
+                    let selected = old.iter().any(|o| o.path == path && o.selected);
                     let thumb = old
                         .iter()
                         .find(|o| o.path == path && o.thumb.size().width > 0)
@@ -331,17 +430,144 @@ pub fn library() -> Result<()> {
                         length: length(c.seconds).into(),
                         path: path.into(),
                         thumb,
+                        selected,
                     }
                 })
                 .collect();
             ui.set_clips(ModelRc::new(VecModel::from(cards)));
+            if ui.get_clips().row_count() == 0 {
+                ui.set_select_mode(false);
+            }
+            sync_selection(&ui);
         }
     };
+    let refresh = Rc::new(refresh);
     refresh();
     let timer = Timer::default();
-    timer.start(TimerMode::Repeated, Duration::from_millis(1000), refresh);
+    {
+        let refresh = refresh.clone();
+        timer.start(
+            TimerMode::Repeated,
+            Duration::from_millis(1000),
+            move || refresh(),
+        );
+    }
 
-    ui.on_open_clip(|p| open_path(&p));
+    // Selection state shared by click and drag: the last clicked card (anchor
+    // for Shift+click) and the selection a drag started from.
+    let anchor: Rc<Cell<Option<usize>>> = Rc::default();
+    let base: Rc<RefCell<Vec<bool>>> = Rc::default();
+    {
+        let weak = ui.as_weak();
+        let anchor = anchor.clone();
+        ui.on_grid_click(move |x, y, w, h, gap, cols, ctrl, shift| {
+            let Some(ui) = weak.upgrade() else { return };
+            let grid = Grid {
+                card_w: w,
+                card_h: h,
+                gap,
+                cols: cols.max(1) as usize,
+                count: ui.get_clips().row_count(),
+            };
+            let Some(i) = grid.hit(x, y) else { return };
+            if shift {
+                ui.set_select_mode(true);
+                let from = anchor.get().unwrap_or(i);
+                let (lo, hi) = (from.min(i), from.max(i));
+                map_selection(&ui, |n, on| on || (lo..=hi).contains(&n));
+            } else if ctrl || ui.get_select_mode() {
+                ui.set_select_mode(true);
+                map_selection(&ui, |n, on| on != (n == i));
+                anchor.set(Some(i));
+            } else if let Some(c) = ui.get_clips().row_data(i) {
+                open_path(&c.path);
+            }
+            if shift && anchor.get().is_none() {
+                anchor.set(Some(i));
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let base = base.clone();
+        ui.on_band_start(move |extend| {
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_select_mode(true);
+            *base.borrow_mut() = ui
+                .get_clips()
+                .iter()
+                .map(|c| extend && c.selected)
+                .collect();
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let base = base.clone();
+        ui.on_band_select(move |x0, y0, x1, y1, w, h, gap, cols| {
+            let Some(ui) = weak.upgrade() else { return };
+            let grid = Grid {
+                card_w: w,
+                card_h: h,
+                gap,
+                cols: cols.max(1) as usize,
+                count: ui.get_clips().row_count(),
+            };
+            let hits = grid.band(x0, y0, x1, y1);
+            let base = base.borrow();
+            map_selection(&ui, |n, _| {
+                base.get(n).copied().unwrap_or(false) || hits.contains(&n)
+            });
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_toggle_select_mode(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let model = ui.get_clips();
+            for i in 0..model.row_count() {
+                let mut c = model.row_data(i).unwrap();
+                if c.selected {
+                    c.selected = false;
+                    model.set_row_data(i, c);
+                }
+            }
+            ui.set_select_mode(!ui.get_select_mode());
+            sync_selection(&ui);
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        // `toggle`: the footer button flips between all and none; Ctrl+A only selects.
+        ui.on_select_all(move |toggle| {
+            let Some(ui) = weak.upgrade() else { return };
+            let model = ui.get_clips();
+            let on = !(toggle && model.iter().all(|c| c.selected));
+            ui.set_select_mode(true);
+            map_selection(&ui, |_, _| on);
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let output = output.clone();
+        let refresh = refresh.clone();
+        ui.on_delete_selected(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let paths: Vec<PathBuf> = ui
+                .get_clips()
+                .iter()
+                .filter(|c| c.selected)
+                .map(|c| PathBuf::from(c.path.as_str()))
+                .collect();
+            let dir = output.borrow().clone();
+            for gone in clips::delete(dir.as_ref(), &paths) {
+                let _ = std::fs::remove_file(thumb_path(&gone));
+            }
+            ui.set_confirming(false);
+            ui.set_select_mode(false);
+            refresh();
+        });
+    }
+    ui.on_change_screen(|| request_async("reselect"));
     ui.on_set_quality(|i| {
         if let Some(&q) = QUALITY.get(i as usize) {
             change("quality", move |c| c.quality = q);
@@ -354,8 +580,13 @@ pub fn library() -> Result<()> {
     });
     // Paused or idle: resume the running recorder; stopped: start one.
     ui.on_start_recorder(|| {
-        if ipc::status().is_ok() {
-            request_async("resume");
+        if let Ok(s) = ipc::status() {
+            // Nothing to resume without a screen: open the picker instead.
+            request_async(if get(&s, "state") == "setup" {
+                "reselect"
+            } else {
+                "resume"
+            });
         } else {
             spawn_detached(&["run"]);
         }
@@ -370,128 +601,83 @@ pub fn library() -> Result<()> {
             }
         });
     }
-    ui.on_close_window(|| {
-        let _ = slint::quit_event_loop();
-    });
+    ui.set_onboarding(!onboarded());
+    {
+        let weak = ui.as_weak();
+        ui.on_finish_onboarding(move || {
+            set_onboarded();
+            if let Some(ui) = weak.upgrade() {
+                ui.set_onboarding(false);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_close_window(move || {
+            // Closing the window also counts as having read the welcome screen.
+            if weak.upgrade().is_some_and(|ui| ui.get_onboarding()) {
+                set_onboarded();
+            }
+            let _ = slint::quit_event_loop();
+        });
+    }
     ui.run()?;
     Ok(())
 }
 
-enum OsdEvent {
-    Saving,
-    /// Seconds saved.
-    Saved(String),
-    /// Short reason ("Disk full").
-    Failed(String),
-    Closed,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn parse_osd(line: &str) -> Option<OsdEvent> {
-    let (kind, rest) = line.split_once(' ').unwrap_or((line, ""));
-    let f: Vec<&str> = rest.split('\t').collect();
-    Some(match kind {
-        "saving" => OsdEvent::Saving,
-        "saved" => OsdEvent::Saved(f[0].to_owned()),
-        "failed" => OsdEvent::Failed(f[0].to_owned()),
-        _ => return None,
-    })
-}
-
-/// The toast. Reads state lines from stdin (see `daemon::Osd`). Nothing shows
-/// while saving; "saved" shows for 2.4 s, "failed" stays until clicked.
-pub fn osd() -> Result<()> {
-    let ui = Osd::new()?;
-    if let Some((w, _)) = screen_size() {
-        ui.window()
-            .set_position(slint::PhysicalPosition::new(w as i32 - 340, 20));
+    #[test]
+    fn long_names_are_shortened() {
+        assert_eq!(shorten("Deadlock", 26), "Deadlock");
+        let long = shorten("The Witcher 3: Wild Hunt - Game of the Year Edition", 26);
+        assert!(long.chars().count() <= 26);
+        assert!(long.ends_with('…'));
     }
-    let weak = ui.as_weak();
-    std::thread::spawn(move || {
-        let stdin = std::io::stdin();
-        for line in stdin.lock().lines().map_while(Result::ok) {
-            if let Some(ev) = parse_osd(&line) {
-                let w = weak.clone();
-                let _ = slint::invoke_from_event_loop(move || apply_osd(w, ev));
-            }
-        }
-        let _ = slint::invoke_from_event_loop(move || apply_osd(weak, OsdEvent::Closed));
-    });
 
-    let started = Rc::new(std::cell::Cell::new(Instant::now()));
-    let state = Rc::new(std::cell::Cell::new(0));
-    let tick = {
-        let ui = ui.as_weak();
-        move || {
-            let Some(ui) = ui.upgrade() else { return };
-            match ui.get_state() {
-                0 => {
-                    let t = started.get().elapsed().as_secs_f32();
-                    ui.set_progress(0.2 + 0.6 * (1.0 - (-t * 3.0).exp()));
-                }
-                1 => {
-                    if state.get() != 1 {
-                        state.set(1);
-                        started.set(Instant::now());
-                    }
-                    let left = 1.0 - started.get().elapsed().as_secs_f32() / 2.4;
-                    ui.set_progress(left.max(0.0));
-                    if left <= 0.0 {
-                        let _ = slint::quit_event_loop();
-                    }
-                }
-                _ => {}
-            }
+    fn grid() -> Grid {
+        // 3 columns of 100x60 cards, 10 px apart, 7 cards.
+        Grid {
+            card_w: 100.0,
+            card_h: 60.0,
+            gap: 10.0,
+            cols: 3,
+            count: 7,
         }
-    };
-    let timer = Timer::default();
-    timer.start(TimerMode::Repeated, Duration::from_millis(16), tick);
-    ui.on_dismiss(|| {
-        let _ = slint::quit_event_loop();
-    });
-    ui.on_open(|| {
-        spawn_detached(&["library"]);
-        let _ = slint::quit_event_loop();
-    });
-    slint::run_event_loop_until_quit()?;
-    Ok(())
-}
-
-fn apply_osd(ui: slint::Weak<Osd>, ev: OsdEvent) {
-    let Some(ui) = ui.upgrade() else { return };
-    match ev {
-        OsdEvent::Saving => ui.set_state(0),
-        OsdEvent::Saved(secs) => {
-            ui.set_state(1);
-            ui.set_heading(format!("Saved {secs} s").into());
-            ui.set_detail("Open in Clips".into());
-            ui.set_progress(1.0);
-            let _ = ui.show();
-        }
-        OsdEvent::Failed(reason) => {
-            ui.set_state(2);
-            ui.set_heading("Couldn't save".into());
-            ui.set_detail(reason.into());
-            let _ = ui.show();
-        }
-        // The recorder went away mid-save: don't leave a spinner behind.
-        OsdEvent::Closed if ui.get_state() == 0 => {
-            let _ = slint::quit_event_loop();
-        }
-        OsdEvent::Closed => {}
     }
-}
 
-/// Primary screen size on X11 via xrandr's "current WxH"; Wayland places the
-/// toast itself.
-fn screen_size() -> Option<(u32, u32)> {
-    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        return None;
+    #[test]
+    fn hit_finds_cards_and_skips_gaps() {
+        let g = grid();
+        assert_eq!(g.hit(30.0, 10.0), Some(0));
+        assert_eq!(g.hit(24.0 + 110.0 + 5.0, 10.0), Some(1));
+        assert_eq!(g.hit(24.0 + 5.0, 70.0 + 5.0), Some(3));
+        assert_eq!(g.hit(24.0 + 105.0, 10.0), None, "gap between columns");
+        assert_eq!(g.hit(30.0, 65.0), None, "gap between rows");
+        assert_eq!(g.hit(10.0, 10.0), None, "left padding");
+        assert_eq!(
+            g.hit(24.0 + 5.0, 140.0 + 70.0 + 5.0),
+            None,
+            "past the last row"
+        );
+        assert_eq!(
+            g.hit(24.0 + 110.0 + 5.0, 140.0 + 5.0),
+            None,
+            "empty slot after card 6"
+        );
+        assert_eq!(g.hit(24.0 + 5.0, 140.0 + 5.0), Some(6));
     }
-    let out = Command::new("xrandr").arg("--current").output().ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let cur = text.split("current ").nth(1)?;
-    let mut it = cur
-        .split(|c: char| !c.is_ascii_digit())
-        .filter(|s| !s.is_empty());
-    Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
+
+    #[test]
+    fn band_selects_touched_cards() {
+        let g = grid();
+        // Covers the right half of card 0 and the left half of card 1, top row only.
+        assert_eq!(g.band(80.0, 10.0, 160.0, 20.0), vec![0, 1]);
+        // Dragging down through the first column.
+        assert_eq!(g.band(30.0, 10.0, 40.0, 150.0), vec![0, 3, 6]);
+        // Only the gap: nothing.
+        assert!(g.band(125.0, 10.0, 130.0, 20.0).is_empty());
+    }
 }

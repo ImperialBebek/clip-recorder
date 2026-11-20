@@ -84,6 +84,27 @@ pub fn list(dir: &Path) -> Vec<Clip> {
         .collect()
 }
 
+/// Deletes the given clips, but only `.mp4` files that sit directly in `dir`.
+/// Returns the paths that were removed.
+pub fn delete(dir: &Path, paths: &[PathBuf]) -> Vec<PathBuf> {
+    let Ok(dir) = dir.canonicalize() else {
+        return Vec::new();
+    };
+    paths
+        .iter()
+        .filter(|p| p.extension().is_some_and(|x| x == "mp4"))
+        .filter(|p| p.parent().and_then(|d| d.canonicalize().ok()).as_deref() == Some(&dir))
+        .filter(|p| match std::fs::remove_file(p) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("delete {}: {e}", p.display());
+                false
+            }
+        })
+        .cloned()
+        .collect()
+}
+
 /// Total size and count of the clips in `dir`.
 pub fn usage(dir: &Path) -> (u64, usize) {
     let Ok(rd) = std::fs::read_dir(dir) else {
@@ -152,6 +173,21 @@ fn find_box(f: &mut File, mut at: u64, to: u64, kind: &[u8; 4]) -> Option<(u64, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delete_only_touches_clips_in_dir() {
+        let root = std::env::temp_dir().join(format!("clip-recorder-del-{}", std::process::id()));
+        let dir = root.join("clips");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, txt, outside) = (dir.join("a.mp4"), dir.join("note.txt"), root.join("b.mp4"));
+        for f in [&a, &txt, &outside] {
+            std::fs::write(f, b"x").unwrap();
+        }
+        let gone = delete(&dir, &[a.clone(), txt.clone(), outside.clone()]);
+        assert_eq!(gone, vec![a.clone()]);
+        assert!(!a.exists() && txt.exists() && outside.exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn titles_from_names() {

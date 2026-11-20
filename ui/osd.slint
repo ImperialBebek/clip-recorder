@@ -1,15 +1,13 @@
 import { Theme } from "theme.slint";
 import { Icon } from "widgets.slint";
 
-// state: 0 saving, 1 saved, 2 failed
+// state: 0 saving, 1 saved, 2 failed, 3 game detected
 export component Osd inherits Window {
     in property <int> state;
     in property <string> heading: "Saving clip…";
     in property <string> detail;
     // 0..1: indeterminate sweep while saving, remaining time once saved.
     in property <float> progress;
-    callback dismiss();
-    callback open();
 
     width: 320px;
     height: 60px;
@@ -35,6 +33,7 @@ export component Osd inherits Window {
                 height: 32px;
                 border-radius: 16px;
                 background: state == 1 ? Theme.red : state == 2 ? Theme.amber-dim : Theme.red-dim;
+                if state == 3: Rectangle { width: 10px; height: 10px; border-radius: 5px; background: Theme.red; }
                 if state == 0: Path {
                     width: 18px;
                     height: 18px;
@@ -59,7 +58,7 @@ export component Osd inherits Window {
             VerticalLayout {
                 alignment: center;
                 spacing: 2px;
-                Text { text: heading; font-family: Theme.body-font; font-weight: 600; font-size: 13px; color: Theme.text; }
+                Text { text: heading; overflow: elide; font-family: Theme.body-font; font-weight: 600; font-size: 13px; color: Theme.text; }
                 Text { text: detail; font-family: Theme.mono-font; font-size: 11px; color: Theme.muted; }
             }
         }
@@ -70,6 +69,5 @@ export component Osd inherits Window {
             width: (state == 2 ? 1 : progress) * parent.width;
             background: state == 0 ? Theme.red : state == 2 ? Theme.amber : #4a4b50;
         }
-        TouchArea { mouse-cursor: pointer; clicked => { if state == 1 { root.open(); } else { root.dismiss(); } } }
     }
 }

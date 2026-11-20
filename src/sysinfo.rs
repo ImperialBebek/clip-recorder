@@ -41,6 +41,47 @@ pub fn running_game() -> Option<String> {
     fallback
 }
 
+/// The game a window belongs to, from its app id and owning process: Steam
+/// (`steam_app_<id>`, Proton included), Lutris, Heroic, or a Wine executable.
+/// Launcher and client windows (Steam itself, Lutris' UI) are not games.
+pub fn game_of_window(app_id: &str, pid: u32) -> Option<String> {
+    // The Steam client is not a game; a window without an app id still can be
+    // one, judged by its process below.
+    if app_id == "steam" {
+        return None;
+    }
+    if let Some(id) = app_id.strip_prefix("steam_app_") {
+        return Some(steam_name(id).unwrap_or_else(|| format!("Steam app {id}")));
+    }
+    if let Ok(env) = std::fs::read(format!("/proc/{pid}/environ")) {
+        let mut named = None;
+        for var in env.split(|&b| b == 0) {
+            let var = String::from_utf8_lossy(var);
+            if let Some(id) = var
+                .strip_prefix("SteamAppId")
+                .and_then(|v| v.strip_prefix('='))
+            {
+                if id != "0" && !id.is_empty() {
+                    return Some(steam_name(id).unwrap_or_else(|| format!("Steam app {id}")));
+                }
+            } else if let Some(n) = var
+                .strip_prefix("LUTRIS_GAME_NAME=")
+                .or_else(|| var.strip_prefix("HEROIC_APP_NAME="))
+            {
+                named.get_or_insert_with(|| n.to_owned());
+            }
+        }
+        if named.is_some() {
+            return named;
+        }
+    }
+    let exe = app_id.strip_suffix(".exe").map(str::to_owned).or_else(|| {
+        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+        comm.trim().strip_suffix(".exe").map(str::to_owned)
+    });
+    exe
+}
+
 fn steam_roots() -> Vec<PathBuf> {
     let home = crate::home();
     let mut roots = vec![
