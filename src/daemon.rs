@@ -489,6 +489,11 @@ pub async fn run(cfg: Config, flags: Flags) -> Result<()> {
     if d.flags.ui && !d.flags.test_source {
         tokio::spawn(async move {
             loop {
+                // Re-read each time so `check_updates = false` stops the requests too.
+                if !Config::load().check_updates {
+                    tokio::time::sleep(Duration::from_secs(24 * 3600)).await;
+                    continue;
+                }
                 match tokio::task::spawn_blocking(crate::update::check).await {
                     Ok(Ok(Some(rel))) => {
                         let _ = update_tx.send(rel.version);
@@ -567,7 +572,7 @@ pub async fn run(cfg: Config, flags: Flags) -> Result<()> {
             }
             _ = usr1.recv() => if !d.paused() { d.save(None) },
             Some(v) = update_rx.recv() => {
-                if d.cfg.check_updates && d.update.as_deref() != Some(v.as_str()) {
+                if d.update.as_deref() != Some(v.as_str()) {
                     notify("Update available", &format!("Clip Recorder v{v} is out. Update from the tray menu or run `clip-recorder update`."));
                     d.update = Some(v.clone());
                     if let Some(t) = &tray {
