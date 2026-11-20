@@ -14,6 +14,8 @@ pub struct Tray {
     pub seconds: u32,
     /// "Alt+S"
     pub hotkey: String,
+    /// A newer release, when one is out.
+    pub update: Option<String>,
 }
 
 fn send(t: &Tray, cmd: &str) {
@@ -62,7 +64,7 @@ impl ksni::Tray for Tray {
         open_window("library");
     }
     fn menu(&self) -> Vec<MenuItem<Self>> {
-        vec![
+        let mut items = vec![
             StandardItem {
                 label: "Save clip".into(),
                 icon_name: "media-record".into(),
@@ -80,6 +82,28 @@ impl ksni::Tray for Tray {
             }
             .into(),
             MenuItem::Separator,
+        ];
+        if let Some(v) = &self.update {
+            items.push(
+                StandardItem {
+                    label: format!("Update to v{v}"),
+                    icon_name: "system-software-update".into(),
+                    activate: Box::new(|_: &mut Self| {
+                        if let Ok(exe) = std::env::current_exe() {
+                            if let Ok(mut c) = std::process::Command::new(exe)
+                                .args(["update", "--notify"])
+                                .spawn()
+                            {
+                                std::thread::spawn(move || c.wait());
+                            }
+                        }
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
+        items.push(
             StandardItem {
                 label: "Quit".into(),
                 icon_name: "application-exit".into(),
@@ -87,7 +111,8 @@ impl ksni::Tray for Tray {
                 ..Default::default()
             }
             .into(),
-        ]
+        );
+        items
     }
 }
 

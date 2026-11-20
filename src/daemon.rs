@@ -72,6 +72,8 @@ struct Daemon {
     warning: String,
     hotkey_backend: &'static str,
     saving: Arc<AtomicBool>,
+    /// Version of a newer release, once the daily check finds one.
+    update: Option<String>,
 }
 
 impl Daemon {
@@ -196,6 +198,10 @@ impl Daemon {
             ("sound", self.cfg.sound.to_string()),
             ("session", sysinfo::session_type().into()),
             ("saving", self.saving.load(Ordering::SeqCst).to_string()),
+            ("version", env!("CARGO_PKG_VERSION").into()),
+            ("update", self.update.clone().unwrap_or_default()),
+            ("args", launch_args()),
+            ("unit", systemd_unit().unwrap_or_default()),
         ];
         lines
             .iter()
@@ -327,6 +333,39 @@ impl Drop for Osd {
     }
 }
 
+/// This process's arguments, tab-separated, for the updater to relaunch with.
+/// Empty when one can't survive that trip (not UTF-8, or has a tab or newline),
+/// so the updater falls back to a plain `run`.
+fn launch_args() -> String {
+    let args: Option<Vec<String>> = std::env::args_os()
+        .skip(1)
+        .map(|a| a.into_string().ok().filter(|a| !a.contains(['\t', '\n'])))
+        .collect();
+    args.map(|a| a.join("\t")).unwrap_or_default()
+}
+
+/// The systemd user unit running this process, e.g. `clip-recorder.service`.
+/// Only when this process is the unit's main process, so a compositor service
+/// that merely launched the recorder is never restarted.
+fn systemd_unit() -> Option<String> {
+    static UNIT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    UNIT.get_or_init(|| {
+        std::env::var_os("INVOCATION_ID")?;
+        let cg = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+        let unit = cg.lines().last()?.rsplit('/').next()?.to_owned();
+        if !unit.ends_with(".service") {
+            return None;
+        }
+        let out = Command::new("systemctl")
+            .args(["--user", "show", "-p", "MainPID", "--value", &unit])
+            .output()
+            .ok()?;
+        let main: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
+        (main == std::process::id()).then_some(unit)
+    })
+    .clone()
+}
+
 pub fn notify(title: &str, body: &str) {
     if let Ok(mut child) = Command::new("notify-send")
         .args([
@@ -438,6 +477,7 @@ pub async fn run(cfg: Config, flags: Flags) -> Result<()> {
         warning: String::new(),
         hotkey_backend: "none",
         saving: Arc::new(AtomicBool::new(false)),
+        update: None,
         disk: Config::load(),
         cfg,
         flags,
@@ -460,11 +500,33 @@ pub async fn run(cfg: Config, flags: Flags) -> Result<()> {
             paused: false,
             seconds: d.cfg.duration,
             hotkey: pretty_combo(&d.cfg.hotkey),
+            update: None,
         })
         .await
     } else {
         None
     };
+
+    let (update_tx, mut update_rx) = mpsc::unbounded_channel::<String>();
+    if d.flags.ui && !d.flags.test_source {
+        tokio::spawn(async move {
+            loop {
+                // Re-read each time so `check_updates = false` stops the requests too.
+                if !Config::load().check_updates {
+                    tokio::time::sleep(Duration::from_secs(24 * 3600)).await;
+                    continue;
+                }
+                match tokio::task::spawn_blocking(crate::update::check).await {
+                    Ok(Ok(Some(rel))) => {
+                        let _ = update_tx.send(rel.version);
+                    }
+                    Ok(Err(e)) => eprintln!("update check: {e:#}"),
+                    _ => {}
+                }
+                tokio::time::sleep(Duration::from_secs(24 * 3600)).await;
+            }
+        });
+    }
 
     let mut usr1 = signal(SignalKind::user_defined1())?;
     let mut term = signal(SignalKind::terminate())?;
@@ -531,6 +593,15 @@ pub async fn run(cfg: Config, flags: Flags) -> Result<()> {
                 }
             }
             _ = usr1.recv() => if !d.paused() { d.save(None) },
+            Some(v) = update_rx.recv() => {
+                if d.update.as_deref() != Some(v.as_str()) {
+                    notify("Update available", &format!("Clip Recorder v{v} is out. Update from the tray menu or run `clip-recorder update`."));
+                    d.update = Some(v.clone());
+                    if let Some(t) = &tray {
+                        t.update(|t| t.update = Some(v)).await;
+                    }
+                }
+            }
             Some(ev) = bus_rx.recv() => match ev {
                 BusEvent::VideoFailed(e) => break Err(anyhow::anyhow!("video capture stopped: {e}")),
                 BusEvent::AudioFailed(e) => {

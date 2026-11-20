@@ -9,6 +9,7 @@ mod ring;
 mod save;
 mod sysinfo;
 mod ui;
+mod update;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -29,6 +30,8 @@ USAGE:
     clip-recorder pause|resume      pause or resume the buffer (pausing frees its RAM)
     clip-recorder status            print the recorder's state
     clip-recorder library           open the clips window
+    clip-recorder update [--check]  install the latest release (or only check for one)
+    clip-recorder --version         print the version
     clip-recorder quit              stop the running recorder
 
 OPTIONS (override ~/.config/clip-recorder/config for this run):
@@ -50,6 +53,8 @@ enum Cmd {
     Run(Config, daemon::Flags),
     Client(&'static str),
     Window(&'static str),
+    Update { check: bool, notify: bool },
+    Version,
     Help,
 }
 
@@ -77,6 +82,17 @@ fn parse_args() -> Result<Cmd> {
                     "status" => return Ok(Cmd::Client("status")),
                     "quit" => return Ok(Cmd::Client("quit")),
                     "library" => return Ok(Cmd::Window("library")),
+                    "update" => {
+                        let (mut check, mut notify) = (false, false);
+                        while let Some(a) = parser.next()? {
+                            match a {
+                                Long("check") => check = true,
+                                Long("notify") => notify = true,
+                                _ => return Err(a.unexpected().into()),
+                            }
+                        }
+                        return Ok(Cmd::Update { check, notify });
+                    }
                     "osd" => return Ok(Cmd::Window("osd")),
                     _ => bail!("unknown command '{cmd}'"),
                 }
@@ -97,6 +113,7 @@ fn parse_args() -> Result<Cmd> {
             Long("reselect") => flags.reselect = true,
             Long("test-source") => flags.test_source = true,
             Short('h') | Long("help") => return Ok(Cmd::Help),
+            Short('V') | Long("version") => return Ok(Cmd::Version),
             _ => return Err(arg.unexpected().into()),
         }
         first = false;
@@ -113,6 +130,44 @@ pub fn home() -> PathBuf {
         .unwrap_or_else(|| "/tmp".into())
 }
 
+/// `notify` (from the tray) reports the outcome as a desktop notification too.
+fn run_update(check: bool, notify: bool) -> Result<()> {
+    let say = |title: &str, body: &str| {
+        println!("{body}");
+        if notify {
+            daemon::notify(title, body);
+        }
+    };
+    let result = (|| {
+        let Some(rel) = update::check()? else {
+            say(
+                "Clip Recorder",
+                &format!("clip-recorder {} is up to date", env!("CARGO_PKG_VERSION")),
+            );
+            return Ok(());
+        };
+        if check {
+            println!(
+                "update available: v{} (run `clip-recorder update`)",
+                rel.version
+            );
+            return Ok(());
+        }
+        println!("installing v{}...", rel.version);
+        let path = update::apply(&rel)?;
+        say(
+            "Clip Recorder updated",
+            &format!("Updated to v{} ({})", rel.version, path.display()),
+        );
+        update::restart(&path);
+        Ok(())
+    })();
+    if let (Err(e), true) = (&result, notify) {
+        daemon::notify("Couldn't update Clip Recorder", &format!("{e:#}"));
+    }
+    result
+}
+
 fn main() -> ExitCode {
     let result = match parse_args() {
         Ok(Cmd::Help) => {
@@ -124,6 +179,11 @@ fn main() -> ExitCode {
                 println!("{}", out.trim_end());
             }
         }),
+        Ok(Cmd::Version) => {
+            println!("clip-recorder {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
+        Ok(Cmd::Update { check, notify }) => run_update(check, notify),
         Ok(Cmd::Window(w)) => match w {
             "osd" => ui::osd(),
             _ => ui::library(),
