@@ -87,6 +87,8 @@ The first run shows the portal's screen picker. The choice is remembered, so lat
 
 Left-click the tray icon to open the library; its menu has Save clip, Open library and Quit. Without a tray (GNOME without the AppIndicator extension), run `clip-recorder library`.
 
+To delete clips, click the check button in the library header, or just hold **Ctrl** and click a clip. Then click clips to pick them, **Shift**+click for a range, or drag a box over them. **Ctrl+A** selects all, **Delete** asks to delete the selection (**Delete** or **Enter** again confirms), **Esc** backs out. Deleting removes the files for good.
+
 ```
 clip-recorder [run] [OPTIONS]   start recording (tray icon, Alt+S to save)
 clip-recorder save              save a clip from the running recorder
