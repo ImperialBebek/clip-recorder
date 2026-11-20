@@ -200,6 +200,11 @@ impl Daemon {
             ("saving", self.saving.load(Ordering::SeqCst).to_string()),
             ("version", env!("CARGO_PKG_VERSION").into()),
             ("update", self.update.clone().unwrap_or_default()),
+            (
+                "args",
+                std::env::args().skip(1).collect::<Vec<_>>().join("\t"),
+            ),
+            ("unit", systemd_unit().unwrap_or_default()),
         ];
         lines
             .iter()
@@ -329,6 +334,14 @@ impl Drop for Osd {
             std::thread::spawn(move || child.wait());
         }
     }
+}
+
+/// The systemd user unit running this process, e.g. `clip-recorder.service`.
+fn systemd_unit() -> Option<String> {
+    std::env::var_os("INVOCATION_ID")?;
+    let cg = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    let unit = cg.lines().last()?.rsplit('/').next()?;
+    unit.ends_with(".service").then(|| unit.to_owned())
 }
 
 pub fn notify(title: &str, body: &str) {

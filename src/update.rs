@@ -1,8 +1,8 @@
 //! Self-update from GitHub releases. Uses `curl`, `tar` and `sha256sum`, so
 //! the binary carries no HTTP or TLS stack of its own.
 
-use std::path::{Path, PathBuf};
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -129,8 +129,8 @@ pub fn check() -> Result<Option<Release>> {
     }))
 }
 
-/// Downloads the release, swaps it in for the running binary and restarts the
-/// recorder if one is running.
+/// Downloads the release and swaps it in for the installed binary. Call
+/// `restart` afterwards to move a running recorder onto it.
 pub fn apply(rel: &Release) -> Result<PathBuf> {
     let exe = std::env::current_exe()?.canonicalize()?;
     let dir = exe.parent().context("binary has no directory")?;
@@ -176,14 +176,27 @@ pub fn apply(rel: &Release) -> Result<PathBuf> {
     })();
     let _ = std::fs::remove_dir_all(&work);
     result?;
-    restart(&exe);
     Ok(exe)
 }
 
-fn restart(exe: &Path) {
-    if ipc::status().is_err() {
+/// Restarts a running recorder with the arguments it was started with. A
+/// recorder run by a systemd user unit is restarted through systemd, since
+/// quitting it would also stop this process when it runs in the same unit.
+pub fn restart(exe: &Path) {
+    let Ok(status) = ipc::status() else {
+        return;
+    };
+    if let Some(unit) = status.get("unit").filter(|u| !u.is_empty()) {
+        let _ = Command::new("systemctl")
+            .args(["--user", "restart", "--no-block"])
+            .arg(unit)
+            .status();
         return;
     }
+    let args: Vec<&str> = status
+        .get("args")
+        .map(|a| a.split('\t').filter(|s| !s.is_empty()).collect())
+        .unwrap_or_default();
     let _ = ipc::request("quit");
     for _ in 0..50 {
         if !ipc::socket_path().exists() {
@@ -191,7 +204,8 @@ fn restart(exe: &Path) {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    if let Ok(mut child) = Command::new(exe).arg("run").spawn() {
+    let args = if args.is_empty() { vec!["run"] } else { args };
+    if let Ok(mut child) = Command::new(exe).args(&args).spawn() {
         std::thread::spawn(move || child.wait());
         // Give it a moment to bind the socket before this process exits.
         std::thread::sleep(Duration::from_millis(500));

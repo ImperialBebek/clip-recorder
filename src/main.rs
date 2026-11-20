@@ -159,6 +159,7 @@ fn run_update(check: bool, notify: bool) -> Result<()> {
             "Clip Recorder updated",
             &format!("Updated to v{} ({})", rel.version, path.display()),
         );
+        update::restart(&path);
         Ok(())
     })();
     if let (Err(e), true) = (&result, notify) {
