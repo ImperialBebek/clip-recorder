@@ -195,7 +195,12 @@ pub fn restart(exe: &Path) {
     }
     let args: Vec<&str> = status
         .get("args")
-        .map(|a| a.split('\t').filter(|s| !s.is_empty()).collect())
+        // `--reselect` was for that launch; replaying it would ask for a screen again.
+        .map(|a| {
+            a.split('\t')
+                .filter(|s| !s.is_empty() && *s != "--reselect")
+                .collect()
+        })
         .unwrap_or_default();
     let _ = ipc::request("quit");
     for _ in 0..50 {
