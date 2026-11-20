@@ -2,7 +2,8 @@
 //! the binary carries no HTTP or TLS stack of its own.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -61,14 +62,28 @@ fn curl(url: &str, accept: &str, out: Option<&Path>) -> Result<Vec<u8>> {
     cmd.args(["-fsSL", "--max-time", "300", "-H"])
         .arg(format!("Accept: {accept}"))
         .args(["-H", "X-GitHub-Api-Version: 2022-11-28"]);
-    if let Some(t) = token() {
-        // curl drops this header when the download redirects to another host.
-        cmd.arg("-H").arg(format!("Authorization: Bearer {t}"));
-    }
     if let Some(p) = out {
         cmd.arg("-o").arg(p);
     }
-    let res = cmd.arg(url).output().context("curl is not installed")?;
+    cmd.arg(url)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // The token goes in through a config on stdin, not argv, so other users
+    // can't read it from the process list. curl drops the header when the
+    // download redirects to another host.
+    let auth = token().map(|t| format!("header = \"Authorization: Bearer {t}\"\n"));
+    if auth.is_some() {
+        cmd.args(["-K", "-"]);
+    }
+    let mut child = cmd.spawn().context("curl is not installed")?;
+    {
+        let mut stdin = child.stdin.take().unwrap();
+        if let Some(a) = &auth {
+            stdin.write_all(a.as_bytes())?;
+        }
+    }
+    let res = child.wait_with_output()?;
     if !res.status.success() {
         let err = String::from_utf8_lossy(&res.stderr);
         if err.contains("404") {
