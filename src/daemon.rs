@@ -345,11 +345,25 @@ fn launch_args() -> String {
 }
 
 /// The systemd user unit running this process, e.g. `clip-recorder.service`.
+/// Only when this process is the unit's main process, so a compositor service
+/// that merely launched the recorder is never restarted.
 fn systemd_unit() -> Option<String> {
-    std::env::var_os("INVOCATION_ID")?;
-    let cg = std::fs::read_to_string("/proc/self/cgroup").ok()?;
-    let unit = cg.lines().last()?.rsplit('/').next()?;
-    unit.ends_with(".service").then(|| unit.to_owned())
+    static UNIT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    UNIT.get_or_init(|| {
+        std::env::var_os("INVOCATION_ID")?;
+        let cg = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+        let unit = cg.lines().last()?.rsplit('/').next()?.to_owned();
+        if !unit.ends_with(".service") {
+            return None;
+        }
+        let out = Command::new("systemctl")
+            .args(["--user", "show", "-p", "MainPID", "--value", &unit])
+            .output()
+            .ok()?;
+        let main: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
+        (main == std::process::id()).then_some(unit)
+    })
+    .clone()
 }
 
 pub fn notify(title: &str, body: &str) {
