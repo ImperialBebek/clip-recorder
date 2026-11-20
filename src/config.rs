@@ -68,7 +68,7 @@ impl Default for Config {
             hotkey: "alt+s".into(),
             pause_without_game: false,
             toast: true,
-            sound: false,
+            sound: true,
             check_updates: true,
         }
     }

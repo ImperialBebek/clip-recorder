@@ -8,6 +8,7 @@ mod platform;
 mod ring;
 mod save;
 mod sysinfo;
+mod toast;
 mod ui;
 mod update;
 
@@ -185,7 +186,7 @@ fn main() -> ExitCode {
         }
         Ok(Cmd::Update { check, notify }) => run_update(check, notify),
         Ok(Cmd::Window(w)) => match w {
-            "osd" => ui::osd(),
+            "osd" => toast::run(),
             _ => ui::library(),
         },
         Ok(Cmd::Run(cfg, flags)) => tokio::runtime::Builder::new_current_thread()

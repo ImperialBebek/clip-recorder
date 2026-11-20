@@ -209,6 +209,15 @@ impl Daemon {
             .collect()
     }
 
+    /// Tells the user a game was found and how to save a clip.
+    fn announce_game(&self) {
+        let Some(name) = self.game.clone() else { return };
+        let hotkey = pretty_combo(&self.cfg.hotkey);
+        if let Some(mut o) = Osd::open() {
+            o.send(&format!("game {name}\t{hotkey}"));
+        }
+    }
+
     fn reload(&mut self, force: &[&str]) -> Result<()> {
         let disk = Config::load();
         let mut new = self.cfg.clone();
@@ -384,11 +393,18 @@ pub fn notify(title: &str, body: &str) {
     }
 }
 
-/// Short click on the default sink.
+/// Two-note chime on the default sink, so a save is audible without looking.
 fn play_click() {
-    let Ok(p) = gst::parse::launch(
-        "audiotestsrc wave=sine freq=1600 volume=0.25 num-buffers=4 samplesperbuffer=441 ! autoaudiosink",
-    ) else {
+    for freq in [880, 1320] {
+        play_tone(freq, 9);
+    }
+}
+
+/// A sine tone of `buffers` x 10 ms.
+fn play_tone(freq: u32, buffers: u32) {
+    let Ok(p) = gst::parse::launch(&format!(
+        "audiotestsrc wave=sine freq={freq} volume=0.2 num-buffers={buffers} samplesperbuffer=441 ! audio/x-raw,rate=44100 ! autoaudiosink"
+    )) else {
         return;
     };
     let _ = p.set_state(gst::State::Playing);
@@ -612,7 +628,11 @@ pub async fn run(cfg: Config, flags: Flags) -> Result<()> {
                 }
             },
             _ = tick.tick() => {
+                let before = d.game.take();
                 d.game = sysinfo::running_game();
+                if d.game.is_some() && d.game != before && d.flags.ui && d.cfg.toast && !d.paused() {
+                    d.announce_game();
+                }
                 if d.game.is_some() {
                     d.auto_override = false;
                 }

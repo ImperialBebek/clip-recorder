@@ -1,14 +1,13 @@
-//! The windows: the clips library and the save toast. Each runs as its own
-//! short-lived process (`clip-recorder library`, `osd`) and talks to the
+//! The windows: the clips library window. Each runs as its own
+//! short-lived process (`clip-recorder library`) and talks to the
 //! recorder over the control socket, so the recorder never loads a GUI.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use gstreamer as gst;
@@ -375,123 +374,4 @@ pub fn library() -> Result<()> {
     });
     ui.run()?;
     Ok(())
-}
-
-enum OsdEvent {
-    Saving,
-    /// Seconds saved.
-    Saved(String),
-    /// Short reason ("Disk full").
-    Failed(String),
-    Closed,
-}
-
-fn parse_osd(line: &str) -> Option<OsdEvent> {
-    let (kind, rest) = line.split_once(' ').unwrap_or((line, ""));
-    let f: Vec<&str> = rest.split('\t').collect();
-    Some(match kind {
-        "saving" => OsdEvent::Saving,
-        "saved" => OsdEvent::Saved(f[0].to_owned()),
-        "failed" => OsdEvent::Failed(f[0].to_owned()),
-        _ => return None,
-    })
-}
-
-/// The toast. Reads state lines from stdin (see `daemon::Osd`). Nothing shows
-/// while saving; "saved" shows for 2.4 s, "failed" stays until clicked.
-pub fn osd() -> Result<()> {
-    let ui = Osd::new()?;
-    if let Some((w, _)) = screen_size() {
-        ui.window()
-            .set_position(slint::PhysicalPosition::new(w as i32 - 340, 20));
-    }
-    let weak = ui.as_weak();
-    std::thread::spawn(move || {
-        let stdin = std::io::stdin();
-        for line in stdin.lock().lines().map_while(Result::ok) {
-            if let Some(ev) = parse_osd(&line) {
-                let w = weak.clone();
-                let _ = slint::invoke_from_event_loop(move || apply_osd(w, ev));
-            }
-        }
-        let _ = slint::invoke_from_event_loop(move || apply_osd(weak, OsdEvent::Closed));
-    });
-
-    let started = Rc::new(std::cell::Cell::new(Instant::now()));
-    let state = Rc::new(std::cell::Cell::new(0));
-    let tick = {
-        let ui = ui.as_weak();
-        move || {
-            let Some(ui) = ui.upgrade() else { return };
-            match ui.get_state() {
-                0 => {
-                    let t = started.get().elapsed().as_secs_f32();
-                    ui.set_progress(0.2 + 0.6 * (1.0 - (-t * 3.0).exp()));
-                }
-                1 => {
-                    if state.get() != 1 {
-                        state.set(1);
-                        started.set(Instant::now());
-                    }
-                    let left = 1.0 - started.get().elapsed().as_secs_f32() / 2.4;
-                    ui.set_progress(left.max(0.0));
-                    if left <= 0.0 {
-                        let _ = slint::quit_event_loop();
-                    }
-                }
-                _ => {}
-            }
-        }
-    };
-    let timer = Timer::default();
-    timer.start(TimerMode::Repeated, Duration::from_millis(16), tick);
-    ui.on_dismiss(|| {
-        let _ = slint::quit_event_loop();
-    });
-    ui.on_open(|| {
-        spawn_detached(&["library"]);
-        let _ = slint::quit_event_loop();
-    });
-    slint::run_event_loop_until_quit()?;
-    Ok(())
-}
-
-fn apply_osd(ui: slint::Weak<Osd>, ev: OsdEvent) {
-    let Some(ui) = ui.upgrade() else { return };
-    match ev {
-        OsdEvent::Saving => ui.set_state(0),
-        OsdEvent::Saved(secs) => {
-            ui.set_state(1);
-            ui.set_heading(format!("Saved {secs} s").into());
-            ui.set_detail("Open in Clips".into());
-            ui.set_progress(1.0);
-            let _ = ui.show();
-        }
-        OsdEvent::Failed(reason) => {
-            ui.set_state(2);
-            ui.set_heading("Couldn't save".into());
-            ui.set_detail(reason.into());
-            let _ = ui.show();
-        }
-        // The recorder went away mid-save: don't leave a spinner behind.
-        OsdEvent::Closed if ui.get_state() == 0 => {
-            let _ = slint::quit_event_loop();
-        }
-        OsdEvent::Closed => {}
-    }
-}
-
-/// Primary screen size on X11 via xrandr's "current WxH"; Wayland places the
-/// toast itself.
-fn screen_size() -> Option<(u32, u32)> {
-    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        return None;
-    }
-    let out = Command::new("xrandr").arg("--current").output().ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let cur = text.split("current ").nth(1)?;
-    let mut it = cur
-        .split(|c: char| !c.is_ascii_digit())
-        .filter(|s| !s.is_empty());
-    Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
 }

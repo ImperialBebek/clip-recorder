@@ -17,8 +17,10 @@ tokio = { version = "1", default-features = false, features = ["rt", "macros", "
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "0.14", default-features = false, features = ["tokio", "screencast", "global_shortcuts"] }
 evdev = "0.13"
+libc = "0.2"
+smithay-client-toolkit = { version = "0.19", default-features = false }
 ksni = { version = "0.3", default-features = false, features = ["tokio"] }
-slint = { version = "1.19", default-features = false, features = ["std", "compat-1-2", "backend-winit-wayland", "backend-winit-x11", "renderer-femtovg", "unstable-winit-030"] }
+slint = { version = "1.19", default-features = false, features = ["std", "compat-1-2", "backend-winit-wayland", "backend-winit-x11", "renderer-femtovg", "renderer-software", "software-renderer-systemfonts", "unstable-winit-030"] }
 
 [build-dependencies]
 slint-build = "1.19"
