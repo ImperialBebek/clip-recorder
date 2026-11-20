@@ -52,6 +52,8 @@ pub struct Config {
     pub pause_without_game: bool,
     pub toast: bool,
     pub sound: bool,
+    /// Look for a newer release once a day.
+    pub check_updates: bool,
 }
 
 impl Default for Config {
@@ -67,6 +69,7 @@ impl Default for Config {
             pause_without_game: false,
             toast: true,
             sound: false,
+            check_updates: true,
         }
     }
 }
@@ -117,6 +120,7 @@ impl Config {
                 }
                 "toast" => c.toast = bool_of(v).unwrap_or(c.toast),
                 "sound" => c.sound = bool_of(v).unwrap_or(c.sound),
+                "check_updates" => c.check_updates = bool_of(v).unwrap_or(c.check_updates),
                 _ => {}
             }
         }
@@ -127,7 +131,7 @@ impl Config {
         let p = path();
         std::fs::create_dir_all(p.parent().unwrap())?;
         let text = format!(
-            "duration = {}\nfps = {}\nquality = {}\nencoder = {}\naudio = {}\noutput = {}\nhotkey = {}\npause_without_game = {}\ntoast = {}\nsound = {}\n",
+            "duration = {}\nfps = {}\nquality = {}\nencoder = {}\naudio = {}\noutput = {}\nhotkey = {}\npause_without_game = {}\ntoast = {}\nsound = {}\ncheck_updates = {}\n",
             self.duration,
             self.fps,
             self.quality.name(),
@@ -138,6 +142,7 @@ impl Config {
             self.pause_without_game,
             self.toast,
             self.sound,
+            self.check_updates,
         );
         std::fs::write(&p, text).with_context(|| format!("cannot write {}", p.display()))
     }
@@ -167,7 +172,8 @@ impl Config {
             hotkey,
             pause_without_game,
             toast,
-            sound
+            sound,
+            check_updates
         );
     }
 }

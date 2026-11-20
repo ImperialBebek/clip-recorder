@@ -204,8 +204,8 @@ fn thumb_worker(ui: slint::Weak<Library>) -> std::sync::mpsc::Sender<PathBuf> {
 /// Only one library window: a second `clip-recorder library` raises the first.
 fn single_instance(ui: slint::Weak<Library>) -> Option<std::os::unix::net::UnixListener> {
     use std::os::linux::net::SocketAddrExt;
-    use std::os::unix::net::{SocketAddr, UnixListener, UnixStream};
     use std::os::unix::fs::MetadataExt;
+    use std::os::unix::net::{SocketAddr, UnixListener, UnixStream};
     // Abstract names are shared by every user on the machine; scope it to ours.
     let uid = std::fs::metadata("/proc/self").map_or(0, |m| m.uid());
     let name = format!("clip-recorder-library-{uid}");

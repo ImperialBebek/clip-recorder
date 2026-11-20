@@ -10,6 +10,24 @@ Ultra-lightweight game clip recorder for Linux. It keeps the last N seconds of y
 
 ## Install
 
+### Prebuilt binary
+
+Download `clip-recorder-x86_64-linux.tar.gz` from the [latest release](https://github.com/ImperialBebek/clip-recorder/releases/latest), then:
+
+```sh
+tar -xzf clip-recorder-x86_64-linux.tar.gz
+./clip-recorder/install.sh        # ~/.local/bin, app menu entry, autostart
+clip-recorder
+```
+
+The binary links the system GStreamer, so the runtime plugins below are still needed (not the `-dev` packages); `install.sh` warns when one is missing. `./install.sh uninstall` removes it again and keeps your clips and settings.
+
+### Updates
+
+The recorder checks for a new release once a day. When there is one, the tray menu shows **Update to vX.Y.Z**; or run `clip-recorder update` (`--check` only reports). It downloads the release, verifies its checksum, replaces the binary and restarts the recorder. While the repository is private, the check needs a GitHub token: `GITHUB_TOKEN`, `GH_TOKEN`, or a logged-in `gh`. Turn it off with `check_updates = false`.
+
+To publish a release, bump `version` in `Cargo.toml`, merge, and push a matching tag (`git tag v0.2.0 && git push origin v0.2.0`); the Release workflow builds and uploads the archive.
+
 ### Dependencies
 
 Arch / CachyOS / EndeavourOS:
@@ -107,6 +125,7 @@ hotkey = alt+s            # read at startup
 pause_without_game = false
 toast = true
 sound = false
+check_updates = true      # daily release check
 ```
 
 RAM use is roughly `bitrate × duration`: 25 Mbit/s for 60 s is about 190 MB. "Pause when no game is running" stops the encoder and frees the buffer while no Steam, Lutris, Heroic, Wine or gamescope game is running.
