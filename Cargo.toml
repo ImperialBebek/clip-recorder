@@ -1,6 +1,6 @@
 [package]
 name = "clip-recorder"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Ultra-lightweight game clip recorder for Linux: PipeWire rolling buffer, hardware encoding, Alt+S to save"
 license = "MIT"
