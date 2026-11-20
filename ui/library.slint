@@ -248,12 +248,16 @@ export component Library inherits Window {
                 root.select-all(false);
                 return accept;
             }
+            // Auto-repeat of a held key is swallowed: one deliberate press per step,
+            // so holding Delete can never walk from "ask" straight to "delete".
             if select-mode && !popover && (e.text == Key.Delete || e.text == Key.Backspace) {
-                if confirming { root.delete-selected(); } else if selected-count > 0 { confirming = true; }
+                if !e.repeat {
+                    if confirming { root.delete-selected(); } else if selected-count > 0 { confirming = true; }
+                }
                 return accept;
             }
             if confirming && e.text == Key.Return {
-                root.delete-selected();
+                if !e.repeat { root.delete-selected(); }
                 return accept;
             }
             reject

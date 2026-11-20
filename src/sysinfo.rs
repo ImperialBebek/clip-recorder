@@ -45,7 +45,9 @@ pub fn running_game() -> Option<String> {
 /// (`steam_app_<id>`, Proton included), Lutris, Heroic, or a Wine executable.
 /// Launcher and client windows (Steam itself, Lutris' UI) are not games.
 pub fn game_of_window(app_id: &str, pid: u32) -> Option<String> {
-    if app_id.is_empty() || app_id == "steam" {
+    // The Steam client is not a game; a window without an app id still can be
+    // one, judged by its process below.
+    if app_id == "steam" {
         return None;
     }
     if let Some(id) = app_id.strip_prefix("steam_app_") {

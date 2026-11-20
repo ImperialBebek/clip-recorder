@@ -425,24 +425,20 @@ async fn sync_tray(tray: &Option<ksni::Handle<tray::Tray>>, d: &Daemon) {
 
 type Streaming = Pin<Box<dyn Future<Output = Result<kwin::Stream>>>>;
 
-/// The game window to record: the active one if several are open.
+/// The game window that has focus right now, if any.
+fn active_game(wins: &[kwin::Window], skip: Option<&str>) -> Option<(String, String)> {
+    wins.iter()
+        .filter(|w| w.active && skip != Some(w.uuid.as_str()))
+        .find_map(|w| Some((w.uuid.clone(), sysinfo::game_of_window(&w.app_id, w.pid)?)))
+}
+
+/// The game window to record: the focused one, else any open game.
 fn pick_game(wins: &[kwin::Window], skip: Option<&str>) -> Option<(String, String)> {
-    let mut found: Option<(bool, &kwin::Window, String)> = None;
-    for w in wins {
-        if skip == Some(w.uuid.as_str()) {
-            continue;
-        }
-        let Some(name) = sysinfo::game_of_window(&w.app_id, w.pid) else {
-            continue;
-        };
-        if found
-            .as_ref()
-            .is_none_or(|(active, ..)| !active && w.active)
-        {
-            found = Some((w.active, w, name));
-        }
-    }
-    found.map(|(_, w, name)| (w.uuid.clone(), name))
+    active_game(wins, skip).or_else(|| {
+        wins.iter()
+            .filter(|w| skip != Some(w.uuid.as_str()))
+            .find_map(|w| Some((w.uuid.clone(), sysinfo::game_of_window(&w.app_id, w.pid)?)))
+    })
 }
 
 impl Daemon {
@@ -875,7 +871,12 @@ pub async fn run(cfg: Config, flags: Flags) -> Result<()> {
                     d.failed_window = None;
                 }
                 let gone = d.window.as_ref().is_some_and(|(uuid, s)| s.is_closed() || !wins.iter().any(|w| &w.uuid == uuid));
-                if gone {
+                // Another game took focus: follow it. Focus on a non-game window
+                // (browser, Discord) keeps the current recording.
+                let switch = d.window.as_ref().is_some_and(|(cur, _)| {
+                    active_game(&wins, d.failed_window.as_deref()).is_some_and(|(uuid, _)| &uuid != cur)
+                });
+                if gone || switch {
                     d.drop_window();
                     sync_tray(&tray, &d).await;
                 }
@@ -888,17 +889,7 @@ pub async fn run(cfg: Config, flags: Flags) -> Result<()> {
             } else {
                 let before = d.game.take();
                 d.game = sysinfo::running_game();
-                if d.game.is_some() && d.game != before {
-                    if d.source.is_none() {
-                        d.notice(true, "Choose a screen to record", "Tray icon → Choose screen");
-                    } else if d.recorder.is_some() {
-                        if d.flags.ui && d.cfg.toast {
-                            d.announce_game();
-                        }
-                    } else if !d.paused() {
-                        d.notice(true, "Not recording", "See the terminal log");
-                    }
-                }
+                let new_game = d.game.is_some() && d.game != before;
                 // First run (or a revoked choice): offer the picker once, never
                 // on top of a game.
                 if d.source.is_none()
@@ -922,6 +913,19 @@ pub async fn run(cfg: Config, flags: Flags) -> Result<()> {
                         eprintln!("{e:#}");
                     }
                     sync_tray(&tray, &d).await;
+                }
+                // Only now: a game starting from idle resumes the recorder just
+                // above, and the toast must see the recorder as running.
+                if new_game {
+                    if d.source.is_none() {
+                        d.notice(true, "Choose a screen to record", "Tray icon → Choose screen");
+                    } else if d.recorder.is_some() {
+                        if d.flags.ui && d.cfg.toast {
+                            d.announce_game();
+                        }
+                    } else if !d.paused() {
+                        d.notice(true, "Not recording", "See the terminal log");
+                    }
                 }
             } }
             _ = tokio::signal::ctrl_c() => break Ok(()),
@@ -961,6 +965,25 @@ mod tests {
             None,
             "no game among browser and Steam"
         );
+    }
+
+    #[test]
+    fn focus_moving_between_games_is_followed_but_not_to_other_windows() {
+        // Recording game "a"; "b" is another open game.
+        let on_b = [
+            win("a", "steam_app_1", false),
+            win("b", "steam_app_2", true),
+        ];
+        assert_eq!(active_game(&on_b, None).map(|g| g.0), Some("b".into()));
+        // Focus on a browser: no game is active, so nothing to switch to.
+        let on_browser = [
+            win("a", "steam_app_1", false),
+            win("b", "steam_app_2", false),
+            win("c", "firefox", true),
+        ];
+        assert_eq!(active_game(&on_browser, None), None);
+        // A game whose stream failed is not switched to again.
+        assert_eq!(active_game(&on_b, Some("b")), None);
     }
 
     #[test]

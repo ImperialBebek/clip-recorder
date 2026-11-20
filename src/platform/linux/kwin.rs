@@ -158,6 +158,29 @@ struct State {
     cmd: mpsc::Sender<Cmd>,
 }
 
+impl State {
+    /// Forgets a stream request and tells KWin we are done with it.
+    fn release(&mut self, id: u64) {
+        if let Some(s) = self.streams.remove(&id) {
+            s._proxy.close();
+        }
+    }
+
+    /// Releases requests whose caller gave up (timeout, dropped future) before
+    /// KWin answered; nobody else would ever close them.
+    fn release_abandoned(&mut self) {
+        let abandoned: Vec<u64> = self
+            .streams
+            .iter()
+            .filter(|(_, p)| p.reply.as_ref().is_some_and(|r| r.is_closed()))
+            .map(|(&id, _)| id)
+            .collect();
+        for id in abandoned {
+            self.release(id);
+        }
+    }
+}
+
 struct Worker {
     conn: Connection,
     queue: EventQueue<State>,
@@ -230,11 +253,7 @@ impl Worker {
                             },
                         );
                     }
-                    Ok(Cmd::Close(id)) => {
-                        if let Some(s) = self.state.streams.remove(&id) {
-                            s._proxy.close();
-                        }
-                    }
+                    Ok(Cmd::Close(id)) => self.state.release(id),
                     Err(mpsc::TryRecvError::Empty) => break,
                     // The program dropped its handle: nothing left to serve.
                     Err(mpsc::TryRecvError::Disconnected) => return Ok(()),
@@ -255,6 +274,7 @@ impl Worker {
                 }
             }
             self.queue.dispatch_pending(&mut self.state)?;
+            self.state.release_abandoned();
             self.publish();
         }
     }
@@ -351,25 +371,42 @@ impl Dispatch<ZkdeScreencastStreamUnstableV1, u64> for State {
         let Some(p) = s.streams.get_mut(id) else {
             return;
         };
+        let mut release = false;
         match ev {
-            st::Event::Created { node } => {
-                if let Some(reply) = p.reply.take() {
-                    let _ = reply.send(Ok(Stream {
+            st::Event::Created { node } => match p.reply.take() {
+                Some(reply) => {
+                    let stream = Stream {
                         node,
                         id: *id,
                         closed: p.closed.clone(),
                         cmd: s.cmd.clone(),
-                    }));
+                    };
+                    // If the caller gave up, the undelivered `Stream` is dropped
+                    // right here and its `Close` releases this entry.
+                    let _ = reply.send(Ok(stream));
                 }
-            }
+                None => release = true,
+            },
             st::Event::Failed { error } => {
                 if let Some(reply) = p.reply.take() {
                     let _ = reply.send(Err(anyhow!("KWin refused the stream: {error}")));
                 }
                 p.closed.store(true, Ordering::SeqCst);
+                // No `Stream` was ever handed out, so nobody will close it.
+                release = true;
             }
-            st::Event::Closed => p.closed.store(true, Ordering::SeqCst),
+            st::Event::Closed => {
+                p.closed.store(true, Ordering::SeqCst);
+                // Ended before it ever started: answer the waiting caller now.
+                if let Some(reply) = p.reply.take() {
+                    let _ = reply.send(Err(anyhow!("KWin closed the stream before it started")));
+                    release = true;
+                }
+            }
             _ => {}
+        }
+        if release {
+            s.release(*id);
         }
     }
 }
