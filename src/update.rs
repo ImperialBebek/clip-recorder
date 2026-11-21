@@ -206,6 +206,7 @@ fn apply_appimage(rel: &Release, appimage: &Path) -> Result<PathBuf> {
             .to_string_lossy(),
         std::process::id()
     ));
+    let mut created = false;
     let result = (|| -> Result<()> {
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
         // A leftover staging file is only removed when it is plainly ours;
@@ -234,6 +235,7 @@ fn apply_appimage(rel: &Release, appimage: &Path) -> Result<PathBuf> {
                     appimage.display()
                 )
             })?;
+        created = true;
         drop(f);
         curl(&rel.asset_url, "application/octet-stream", Some(&tmp))?;
         verify_sum(rel, &tmp)?;
@@ -243,7 +245,7 @@ fn apply_appimage(rel: &Release, appimage: &Path) -> Result<PathBuf> {
             .with_context(|| format!("cannot replace {}", appimage.display()))?;
         Ok(())
     })();
-    if result.is_err() {
+    if result.is_err() && created {
         let _ = std::fs::remove_file(&tmp);
     }
     result?;
