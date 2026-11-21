@@ -34,28 +34,37 @@ pub fn write_mp4(snap: Snapshot, path: &Path) -> Result<gst::ClockTime> {
     add_chain(&pipeline, &[vsrc.clone().upcast(), make("h264parse", &[])?])?;
     link_last(&pipeline, "h264parse", &mux)?;
 
-    let audio = match (&snap.audio.caps, snap.audio.packets.is_empty()) {
-        (Some(acaps), false) => {
-            let parser = if acaps
-                .structure(0)
-                .is_some_and(|s| s.name() == "audio/x-opus")
-            {
-                "opusparse"
-            } else {
-                "aacparse"
-            };
-            let asrc = appsrc(acaps);
-            add_chain(&pipeline, &[asrc.clone().upcast(), make(parser, &[])?])?;
-            link_last(&pipeline, parser, &mux)?;
-            Some(asrc)
-        }
-        _ => None,
-    };
+    // Each enabled audio source becomes its own MP4 track, titled so the
+    // built-in player can label its lanes.
+    let mut audio = Vec::new();
+    for (title, track) in &snap.aux {
+        let (Some(acaps), false) = (&track.caps, track.packets.is_empty()) else {
+            continue;
+        };
+        let acaps = acaps.clone();
+        let parser = if acaps
+            .structure(0)
+            .is_some_and(|s| s.name() == "audio/x-opus")
+        {
+            "opusparse"
+        } else {
+            "aacparse"
+        };
+        let title = format!("title={title}");
+        let asrc = appsrc(&acaps);
+        let parser = make(parser, &[])?;
+        let tags = make("taginject", &[("tags", &title)])?;
+        pipeline.add_many([asrc.clone().upcast(), parser.clone(), tags.clone()])?;
+        gst::Element::link_many([&asrc.clone().upcast(), &parser, &tags])?;
+        tags.link(&mux)
+            .context("mp4mux does not accept the audio track")?;
+        audio.push((asrc, track));
+    }
 
     pipeline.set_state(gst::State::Playing)?;
     push_track(&vsrc, &snap.video, base, true)?;
-    if let Some(asrc) = &audio {
-        push_track(asrc, &snap.audio, base, false)?;
+    for (asrc, track) in &audio {
+        push_track(asrc, track, base, false)?;
     }
 
     let bus = pipeline.bus().unwrap();

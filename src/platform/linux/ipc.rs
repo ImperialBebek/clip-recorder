@@ -90,3 +90,95 @@ pub fn status() -> Result<std::collections::HashMap<String, String>> {
         .map(|(k, v)| (k.to_owned(), v.to_owned()))
         .collect())
 }
+
+/// The abstract socket the library window listens on. Abstract names are
+/// shared by every user on the machine, so scope it to ours.
+pub fn library_name() -> String {
+    use std::os::unix::fs::MetadataExt;
+    let uid = std::fs::metadata("/proc/self").map_or(0, |m| m.uid());
+    format!("clip-recorder-library-{uid}")
+}
+
+/// The library window's abstract socket address.
+pub fn library_addr() -> Option<std::os::unix::net::SocketAddr> {
+    use std::os::linux::net::SocketAddrExt;
+    std::os::unix::net::SocketAddr::from_abstract_name(library_name().as_bytes()).ok()
+}
+
+/// Sends one line to the open library window. False when no library is open.
+pub fn tell_library(msg: &str) -> bool {
+    tell_library_at(&library_name(), msg)
+}
+
+/// `tell_library` against an arbitrary abstract socket name, for tests.
+fn tell_library_at(name: &str, msg: &str) -> bool {
+    use std::io::Write;
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr, UnixStream};
+    let Some(addr) = SocketAddr::from_abstract_name(name.as_bytes()).ok() else {
+        return false;
+    };
+    UnixStream::connect_addr(&addr)
+        .and_then(|mut s| s.write_all(format!("{msg}\n").as_bytes()))
+        .is_ok()
+}
+
+/// A line the library's control socket understands; an empty connection is
+/// the old "just focus" poke.
+#[derive(Debug, PartialEq)]
+pub enum LibraryMsg {
+    Focus(Option<String>),
+    Quit,
+}
+
+pub fn parse_library_msg(line: &str) -> Option<LibraryMsg> {
+    match line.trim().split_once(' ') {
+        None => match line.trim() {
+            "" | "focus" => Some(LibraryMsg::Focus(None)),
+            "quit" => Some(LibraryMsg::Quit),
+            _ => None,
+        },
+        Some(("focus", token)) if !token.is_empty() => {
+            Some(LibraryMsg::Focus(Some(token.to_owned())))
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr, UnixListener};
+
+    #[test]
+    fn parses_library_lines() {
+        assert_eq!(parse_library_msg(""), Some(LibraryMsg::Focus(None)));
+        assert_eq!(parse_library_msg("focus"), Some(LibraryMsg::Focus(None)));
+        assert_eq!(
+            parse_library_msg("focus kwin-12"),
+            Some(LibraryMsg::Focus(Some("kwin-12".into())))
+        );
+        assert_eq!(parse_library_msg("quit"), Some(LibraryMsg::Quit));
+        assert_eq!(parse_library_msg("focus "), Some(LibraryMsg::Focus(None)));
+        assert_eq!(parse_library_msg("bogus"), None);
+        assert_eq!(parse_library_msg("quit now"), None);
+    }
+
+    #[test]
+    fn tell_library_at_round_trip() {
+        let name = format!("clip-recorder-test-{}", std::process::id());
+        let addr = SocketAddr::from_abstract_name(name.as_bytes()).unwrap();
+        let listener = UnixListener::bind_addr(&addr).unwrap();
+        let got = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            s.read_to_string(&mut line).unwrap();
+            line
+        });
+        assert!(tell_library_at(&name, "quit"));
+        assert_eq!(got.join().unwrap(), "quit\n");
+        assert!(!tell_library_at("clip-recorder-nobody-home", "focus"));
+    }
+}

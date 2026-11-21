@@ -23,12 +23,13 @@ impl Track {
 pub struct Ring {
     window: gst::ClockTime,
     pub video: Track,
-    pub audio: Track,
+    /// Extra audio tracks (Game, Voice, Other, Mic, …) with their titles.
+    pub aux: Vec<(String, Track)>,
 }
 
 pub struct Snapshot {
     pub video: Track,
-    pub audio: Track,
+    pub aux: Vec<(String, Track)>,
 }
 
 fn is_keyframe(buf: &gst::BufferRef) -> bool {
@@ -40,7 +41,7 @@ impl Ring {
         Self {
             window,
             video: Track::default(),
-            audio: Track::default(),
+            aux: Vec::new(),
         }
     }
 
@@ -59,24 +60,48 @@ impl Ring {
         self.trim(latest);
     }
 
-    pub fn push_audio(&mut self, caps: Option<gst::Caps>, buf: gst::Buffer) {
+    /// Replaces the aux track set (called when the recorder starts; the old
+    /// tracks' buffered packets are dropped).
+    pub fn set_aux(&mut self, titles: &[String]) {
+        self.aux = titles
+            .iter()
+            .map(|t| (t.clone(), Track::default()))
+            .collect();
+    }
+
+    /// Pushes an encoded buffer to aux track `index`.
+    pub fn push_aux(&mut self, index: usize, caps: Option<gst::Caps>, buf: gst::Buffer) {
+        let Some((_, track)) = self.aux.get_mut(index) else {
+            return;
+        };
+        Self::push_aux_track(track, self.window, self.video.packets.is_empty(), caps, buf);
+    }
+
+    /// An encoded stream trimmed on its own clock until video shows up, then
+    /// trimmed to the video window by `trim`.
+    fn push_aux_track(
+        track: &mut Track,
+        window: gst::ClockTime,
+        video_empty: bool,
+        caps: Option<gst::Caps>,
+        buf: gst::Buffer,
+    ) {
         if buf.pts().is_none() {
             return;
         }
         if caps.is_some() {
-            self.audio.caps = caps;
+            track.caps = caps;
         }
-        self.audio.packets.push_back(buf);
-        if self.video.packets.is_empty() {
-            let latest = self.audio.packets.back().unwrap().pts().unwrap();
-            let cutoff = latest.saturating_sub(self.window);
-            while self
-                .audio
+        track.packets.push_back(buf);
+        if video_empty {
+            let latest = track.packets.back().unwrap().pts().unwrap();
+            let cutoff = latest.saturating_sub(window);
+            while track
                 .packets
                 .front()
                 .is_some_and(|b| b.pts().unwrap() < cutoff)
             {
-                self.audio.packets.pop_front();
+                track.packets.pop_front();
             }
         }
     }
@@ -105,25 +130,26 @@ impl Ring {
             .front()
             .and_then(|b| b.pts())
             .unwrap_or(cutoff);
-        while self
-            .audio
-            .packets
-            .front()
-            .is_some_and(|b| b.pts().unwrap() < start)
-        {
-            self.audio.packets.pop_front();
+        for (_, track) in &mut self.aux {
+            while track
+                .packets
+                .front()
+                .is_some_and(|b| b.pts().unwrap() < start)
+            {
+                track.packets.pop_front();
+            }
         }
     }
 
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
             video: self.video.clone(),
-            audio: self.audio.clone(),
+            aux: self.aux.clone(),
         }
     }
 
     pub fn bytes(&self) -> usize {
-        self.video.bytes() + self.audio.bytes()
+        self.video.bytes() + self.aux.iter().map(|(_, t)| t.bytes()).sum::<usize>()
     }
 
     /// Takes effect on the next GOP boundary; no restart needed.
@@ -146,7 +172,9 @@ impl Ring {
 
     pub fn clear(&mut self) {
         self.video.packets.clear();
-        self.audio.packets.clear();
+        for (_, t) in &mut self.aux {
+            t.packets.clear();
+        }
     }
 
     /// "1080p60" from the negotiated caps.
@@ -177,17 +205,20 @@ mod tests {
     fn keeps_keyframe_aligned_window() {
         gst::init().unwrap();
         let mut ring = Ring::new(gst::ClockTime::from_seconds(2));
+        ring.set_aux(&["Game".into(), "Mic".into()]);
         // 10 fps, keyframe every second, 5 seconds of video.
         for i in 0..50u64 {
             ring.push_video(None, buf(i * 100, i % 10 == 0));
-            ring.push_audio(None, buf(i * 100, true));
+            ring.push_aux(0, None, buf(i * 100, true));
+            ring.push_aux(1, None, buf(i * 100, true));
         }
         let first = ring.video.packets.front().unwrap();
         assert!(is_keyframe(first));
         // latest = 4.9s, cutoff = 2.9s -> must start at the 2s keyframe.
         assert_eq!(first.pts(), Some(gst::ClockTime::from_seconds(2)));
         assert_eq!(ring.video.packets.len(), 30);
-        assert_eq!(ring.audio.packets.front().unwrap().pts(), first.pts());
+        assert_eq!(ring.aux[0].1.packets.front().unwrap().pts(), first.pts());
+        assert_eq!(ring.aux[1].1.packets.front().unwrap().pts(), first.pts());
     }
 
     #[test]

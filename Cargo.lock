@@ -613,7 +613,7 @@ dependencies = [
 
 [[package]]
 name = "clip-recorder"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -629,6 +629,7 @@ dependencies = [
  "slint-build",
  "smithay-client-toolkit 0.19.2",
  "tokio",
+ "wayland-backend",
  "wayland-client",
  "wayland-protocols-plasma",
 ]

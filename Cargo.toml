@@ -1,6 +1,6 @@
 [package]
 name = "clip-recorder"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 description = "Ultra-lightweight game clip recorder for Linux: PipeWire rolling buffer, hardware encoding, Alt+S to save"
 license = "MIT"
@@ -19,6 +19,7 @@ ashpd = { version = "0.14", default-features = false, features = ["tokio", "scre
 evdev = "0.13"
 libc = "0.2"
 smithay-client-toolkit = { version = "0.19", default-features = false }
+wayland-backend = { version = "0.3", features = ["client_system"] }
 wayland-client = "0.31"
 wayland-protocols-plasma = { version = "0.3", features = ["client"] }
 ksni = { version = "0.3", default-features = false, features = ["tokio"] }
