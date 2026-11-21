@@ -286,6 +286,24 @@ fn set_onboarded() {
 }
 
 /// Only one library window: a second `clip-recorder library` raises the first.
+/// The peer's uid on a Unix socket, or `None` when the kernel won't say.
+fn peer_uid(stream: &std::os::unix::net::UnixStream) -> Option<libc::uid_t> {
+    use std::os::unix::io::AsRawFd;
+    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: `cred` is a valid ucred the size of `len`, filled on success.
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut cred as *mut libc::ucred).cast(),
+            &mut len,
+        )
+    };
+    (rc == 0).then_some(cred.uid)
+}
+
 fn single_instance(ui: slint::Weak<Library>) -> Option<std::os::unix::net::UnixListener> {
     use std::io::Read;
     use std::os::unix::net::UnixListener;
@@ -294,7 +312,14 @@ fn single_instance(ui: slint::Weak<Library>) -> Option<std::os::unix::net::UnixL
         Ok(l) => {
             let listener = l.try_clone().ok()?;
             std::thread::spawn(move || {
+                // Abstract sockets have no filesystem permissions; only our
+                // own uid may talk to the library.
+                // SAFETY: getuid takes no input and cannot fail.
+                let own_uid = unsafe { libc::getuid() };
                 for mut stream in listener.incoming().flatten() {
+                    if peer_uid(&stream) != Some(own_uid) {
+                        continue;
+                    }
                     let mut line = String::new();
                     if stream.read_to_string(&mut line).is_err() {
                         continue;
@@ -497,6 +522,7 @@ pub fn library() -> Result<()> {
             *player.borrow_mut() = None;
             let weak = ui.as_weak();
             let scheduled = Arc::new(AtomicBool::new(false));
+            let shown_frame = Arc::new(AtomicBool::new(false));
             let want_frame = {
                 let scheduled = scheduled.clone();
                 move || !scheduled.load(Ordering::SeqCst)
@@ -508,6 +534,7 @@ pub fn library() -> Result<()> {
                     None::<slint::SharedPixelBuffer<slint::Rgba8Pixel>>,
                 ));
                 let scheduled = scheduled.clone();
+                let shown_frame = shown_frame.clone();
                 move |buf| {
                     *latest.lock().unwrap() = Some(buf);
                     if scheduled.swap(true, Ordering::SeqCst) {
@@ -517,6 +544,7 @@ pub fn library() -> Result<()> {
                     let player_gen = player_gen.clone();
                     let latest = latest.clone();
                     let scheduled = scheduled.clone();
+                    let shown_frame = shown_frame.clone();
                     let _ = slint::invoke_from_event_loop(move || {
                         scheduled.store(false, Ordering::SeqCst);
                         if player_gen.load(Ordering::SeqCst) != gen {
@@ -525,6 +553,7 @@ pub fn library() -> Result<()> {
                         let Some(buf) = latest.lock().unwrap().take() else { return };
                         if let Some(ui) = weak.upgrade() {
                             ui.set_frame(slint::Image::from_rgba8(buf));
+                            shown_frame.store(true, Ordering::SeqCst);
                         }
                     });
                 }
@@ -597,8 +626,33 @@ pub fn library() -> Result<()> {
                     });
                 }
             };
-            let p =
-                match crate::player::Player::open(path, on_frame, want_frame, on_tracks) {
+            // A decoder that fails before showing a frame leaves a blank
+            // player; back out to the grid and open the clip externally then.
+            let on_error = {
+                let weak = weak.clone();
+                let player_gen = player_gen.clone();
+                let path = path.to_path_buf();
+                move |err: String| {
+                    eprintln!("player {}: {err}", path.display());
+                    if shown_frame.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    let weak = weak.clone();
+                    let player_gen = player_gen.clone();
+                    let path = path.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if player_gen.load(Ordering::SeqCst) != gen {
+                            return;
+                        }
+                        let Some(ui) = weak.upgrade() else { return };
+                        ui.invoke_player_back();
+                        open_path(&path);
+                    });
+                }
+            };
+            let p = match crate::player::Player::open(
+                path, on_frame, want_frame, on_tracks, on_error,
+            ) {
                 Ok(p) => p,
                 Err(e) => {
                     eprintln!("player {}: {e:#}", path.display());
@@ -606,6 +660,8 @@ pub fn library() -> Result<()> {
                     return;
                 }
             };
+            p.set_volume(ui.get_volume() as f64);
+            p.set_muted(ui.get_muted());
             p.play();
             *player.borrow_mut() = Some(p);
             *player_path.borrow_mut() = Some(path.to_path_buf());
@@ -630,7 +686,6 @@ pub fn library() -> Result<()> {
             ui.set_pos(0.0);
             ui.set_dur(0.0);
             ui.set_playing(true);
-            ui.set_muted(false);
             ui.set_player_confirming(false);
             ui.set_player_open(true);
             pos_timer.start(

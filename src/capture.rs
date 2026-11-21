@@ -1,8 +1,9 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
@@ -87,6 +88,11 @@ pub struct Recorder {
     mic: Option<gst::Pipeline>,
     cats: Vec<(Category, Arc<Mutex<CategoryShared>>)>,
     watcher: Option<Watcher>,
+    /// One per bus-watch thread; cleared on stop so the threads exit.
+    video_alive: Arc<AtomicBool>,
+    audio_alive: Arc<AtomicBool>,
+    mic_alive: Arc<AtomicBool>,
+    cat_alives: Vec<Arc<AtomicBool>>,
 }
 
 pub enum BusEvent {
@@ -132,7 +138,10 @@ impl Recorder {
         }
         let (video, encoder) =
             video.ok_or_else(|| anyhow!("no encoder could start, see errors above"))?;
-        watch_bus(&video, {
+        let video_alive = Arc::new(AtomicBool::new(true));
+        let audio_alive = Arc::new(AtomicBool::new(true));
+        let mic_alive = Arc::new(AtomicBool::new(true));
+        watch_bus(&video, &video_alive, {
             let events = events.clone();
             move |msg| events(BusEvent::Video(msg))
         });
@@ -162,6 +171,7 @@ impl Recorder {
         ring.lock().unwrap().set_aux(&titles);
 
         let mut cats = Vec::new();
+        let mut cat_alives = Vec::new();
         let mut watcher = None;
         let mut audio = None;
         let mut audio_name = None;
@@ -180,10 +190,12 @@ impl Recorder {
                             mixer,
                             branches: HashMap::new(),
                         }));
-                        watch_cat_bus(&shared, {
+                        let alive = Arc::new(AtomicBool::new(true));
+                        watch_cat_bus(&shared, &alive, {
                             let events = events.clone();
                             move |msg| events(BusEvent::Audio(msg))
                         });
+                        cat_alives.push(alive);
                         cats.push((*cat, shared));
                     }
                     Err(e) => {
@@ -242,7 +254,7 @@ impl Recorder {
                 }
             }
             if let Some(p) = &audio {
-                watch_bus(p, {
+                watch_bus(p, &audio_alive, {
                     let events = events.clone();
                     move |msg| events(BusEvent::Audio(msg))
                 });
@@ -265,7 +277,7 @@ impl Recorder {
             }
         }
         if let Some((p, _)) = &mic {
-            watch_bus(p, move |msg| events(BusEvent::Mic(msg)));
+            watch_bus(p, &mic_alive, move |msg| events(BusEvent::Mic(msg)));
         } else if want_mic {
             eprintln!("microphone unavailable, recording without it");
         }
@@ -280,6 +292,10 @@ impl Recorder {
             mic: mic.map(|(p, _)| p),
             cats,
             watcher,
+            video_alive,
+            audio_alive,
+            mic_alive,
+            cat_alives,
         })
     }
 
@@ -302,6 +318,11 @@ impl Recorder {
 
     pub fn stop_audio(&mut self) {
         drop(self.watcher.take());
+        self.audio_alive.store(false, Ordering::Relaxed);
+        for alive in &self.cat_alives {
+            alive.store(false, Ordering::Relaxed);
+        }
+        self.cat_alives.clear();
         stop_cats(&mut self.cats);
         if let Some(p) = self.audio.take() {
             let _ = p.set_state(gst::State::Null);
@@ -309,15 +330,29 @@ impl Recorder {
     }
 
     pub fn stop_mic(&mut self) {
+        self.mic_alive.store(false, Ordering::Relaxed);
         if let Some(p) = self.mic.take() {
             let _ = p.set_state(gst::State::Null);
         }
     }
 
     pub fn stop(&mut self) {
+        self.video_alive.store(false, Ordering::Relaxed);
         self.stop_audio();
         self.stop_mic();
         let _ = self.video.set_state(gst::State::Null);
+    }
+
+    #[cfg(test)]
+    fn pipeline_weaks(&self) -> Vec<gst::glib::object::WeakRef<gst::Pipeline>> {
+        let mut weaks = vec![self.video.downgrade()];
+        for p in [&self.audio, &self.mic].into_iter().flatten() {
+            weaks.push(p.downgrade());
+        }
+        for (_, shared) in &self.cats {
+            weaks.push(shared.lock().unwrap().pipeline.downgrade());
+        }
+        weaks
     }
 }
 
@@ -352,11 +387,20 @@ fn add_branch(shared: &Arc<Mutex<CategoryShared>>, stream: &AppStream) {
         return;
     }
     let build = || -> Result<(gst::Bin, gst::Pad, gst::Pad)> {
+        // Never open an untargeted pipewiresrc: it would record the default
+        // source (even the microphone) instead of this app's stream.
+        let prop = platform::pw_target_prop()
+            .context("pipewiresrc cannot target a single app stream")?;
+        let target = if prop == "target-object" {
+            stream.serial.clone()
+        } else {
+            stream.id.to_string()
+        };
         let bin = gst::Bin::with_name(&format!("app-{}", stream.id));
         let src = make(
             "pipewiresrc",
             &[
-                ("target-object", stream.serial.as_str()),
+                (prop, target.as_str()),
                 ("do-timestamp", "true"),
                 (
                     "stream-properties",
@@ -422,17 +466,26 @@ fn remove_branch(shared: &Arc<Mutex<CategoryShared>>, id: u32) {
 }
 
 /// Like `watch_bus`, but an error inside an `app-*` branch bin only removes
-/// that branch; the category track keeps running on its silence source.
-fn watch_cat_bus(shared: &Arc<Mutex<CategoryShared>>, on_fail: impl Fn(String) + Send + 'static) {
+/// that branch; the category track keeps running on its silence source. Holds
+/// the shared state weakly so a stopped Recorder can be freed.
+fn watch_cat_bus(
+    shared: &Arc<Mutex<CategoryShared>>,
+    alive: &Arc<AtomicBool>,
+    on_fail: impl Fn(String) + Send + 'static,
+) {
     let bus = shared
         .lock()
         .unwrap()
         .pipeline
         .bus()
         .expect("pipeline has a bus");
-    let shared = shared.clone();
+    let weak = Arc::downgrade(shared);
+    let alive = alive.clone();
     std::thread::spawn(move || {
-        for msg in bus.iter_timed(gst::ClockTime::NONE) {
+        while alive.load(Ordering::Relaxed) {
+            let Some(msg) = bus.timed_pop(gst::ClockTime::from_mseconds(100)) else {
+                continue;
+            };
             match msg.view() {
                 gst::MessageView::Error(e) => {
                     let text = format!(
@@ -441,6 +494,9 @@ fn watch_cat_bus(shared: &Arc<Mutex<CategoryShared>>, on_fail: impl Fn(String) +
                         e.debug().map(|d| d.to_string()).unwrap_or_default()
                     );
                     if let Some(id) = branch_of(&msg) {
+                        let Some(shared) = weak.upgrade() else {
+                            return;
+                        };
                         eprintln!("app stream #{id} failed ({text}), removing its branch");
                         remove_branch(&shared, id);
                         continue;
@@ -681,10 +737,20 @@ fn pop_error(bus: &gst::Bus) -> Option<String> {
     }
 }
 
-fn watch_bus(pipeline: &gst::Pipeline, on_fail: impl Fn(String) + Send + 'static) {
+/// Reports pipeline failure on `on_fail`; exits when `alive` goes false or
+/// the pipeline dies. Holds the bus only, never the pipeline itself.
+fn watch_bus(
+    pipeline: &gst::Pipeline,
+    alive: &Arc<AtomicBool>,
+    on_fail: impl Fn(String) + Send + 'static,
+) {
     let bus = pipeline.bus().expect("pipeline has a bus");
+    let alive = alive.clone();
     std::thread::spawn(move || {
-        for msg in bus.iter_timed(gst::ClockTime::NONE) {
+        while alive.load(Ordering::Relaxed) {
+            let Some(msg) = bus.timed_pop(gst::ClockTime::from_mseconds(100)) else {
+                continue;
+            };
             match msg.view() {
                 gst::MessageView::Error(e) => {
                     on_fail(format!(
@@ -739,5 +805,41 @@ mod tests {
         std::fs::create_dir_all("/tmp/clip-test").unwrap();
         let secs = crate::save::write_mp4(snap, Path::new("/tmp/clip-test/split.mp4")).unwrap();
         eprintln!("wrote {}s to /tmp/clip-test/split.mp4", secs.seconds());
+    }
+
+    /// A stopped Recorder must free every pipeline and end every bus thread;
+    /// pause and game switches go through `stop` many times a session.
+    #[test]
+    #[ignore = "uses real GStreamer pipelines; run manually"]
+    fn stopped_recorder_frees_pipelines() {
+        gst::init().unwrap();
+        let settings = Settings {
+            fps: 30,
+            kbps: 4000,
+            encoder: None,
+            audio: AudioSource::Test,
+            mic: AudioSource::Test,
+            mic_device: None,
+            track_game: true,
+            track_voice: false,
+            track_other: false,
+        };
+        for _ in 0..3 {
+            let ring = Arc::new(Mutex::new(Ring::new(gst::ClockTime::from_seconds(5))));
+            let mut rec = Recorder::start(&VideoSource::Test, &settings, ring, |_| {})
+                .expect("recorder could not start");
+            let weaks = rec.pipeline_weaks();
+            std::thread::sleep(Duration::from_millis(300));
+            rec.stop();
+            drop(rec);
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while weaks.iter().any(|w| w.upgrade().is_some()) {
+                assert!(
+                    Instant::now() < deadline,
+                    "pipeline outlived its Recorder"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
     }
 }

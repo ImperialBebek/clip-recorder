@@ -72,22 +72,52 @@ pub fn audio_element(src: AudioSource) -> Result<gst::Element> {
     }
 }
 
+/// Which pipewiresrc property targets one PipeWire node, if the installed
+/// version has one: `target-object` (object serial, current) or the older
+/// `path` (node id). Old pipewiresrc has neither and must not be used
+/// untargeted — it would open the default source instead.
+pub fn pw_target(has_target_object: bool, has_path: bool) -> Option<&'static str> {
+    if has_target_object {
+        Some("target-object")
+    } else if has_path {
+        Some("path")
+    } else {
+        None
+    }
+}
+
+/// `pw_target` for the installed pipewiresrc; `None` when it can't target a
+/// node at all.
+pub fn pw_target_prop() -> Option<&'static str> {
+    let el = gst::ElementFactory::make("pipewiresrc").build().ok()?;
+    pw_target(
+        el.find_property("target-object").is_some(),
+        el.find_property("path").is_some(),
+    )
+}
+
 /// Records the microphone. `device` is a PipeWire/Pulse source name;
 /// `None` records the default input. Uses the same backend list as
 /// `audio_candidates`.
 pub fn mic_element(src: AudioSource, device: Option<&str>) -> Result<gst::Element> {
     match src {
         AudioSource::PipeWire => {
-            let mut props: Vec<(&str, &str)> = vec![
-                ("do-timestamp", "true"),
-                (
-                    "stream-properties",
-                    "props,media.category=(string)Capture,media.role=(string)Communication",
-                ),
-            ];
+            let mut props: Vec<(&str, &str)> = vec![("do-timestamp", "true")];
+            let mut stream_props =
+                "props,media.category=(string)Capture,media.role=(string)Communication"
+                    .to_string();
             if let Some(dev) = device {
-                props.push(("target-object", dev));
+                if pw_target_prop() == Some("target-object") {
+                    props.push(("target-object", dev));
+                    // A missing node must fail, not fall back to another mic.
+                    stream_props.push_str(
+                        ",node.dont-reconnect=(boolean)true,node.dont-fallback=(boolean)true",
+                    );
+                } else {
+                    bail!("microphone {dev} not found");
+                }
             }
+            props.push(("stream-properties", stream_props.as_str()));
             make("pipewiresrc", &props)
         }
         AudioSource::Pulse => {
@@ -146,4 +176,17 @@ pub fn state_dir() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| crate::home().join(".local").join("state"))
         .join("clip-recorder")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn picks_target_property() {
+        assert_eq!(pw_target(true, true), Some("target-object"));
+        assert_eq!(pw_target(true, false), Some("target-object"));
+        assert_eq!(pw_target(false, true), Some("path"));
+        assert_eq!(pw_target(false, false), None);
+    }
 }

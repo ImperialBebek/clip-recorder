@@ -664,7 +664,7 @@ export component Library inherits Window {
                                 root.scrubbing = true;
                                 root.scrub-pos = clamp(self.mouse-x / max(self.width, 1px), 0, 1) * root.dur;
                                 root.seek(root.scrub-pos);
-                            } else if e.kind == PointerEventKind.up {
+                            } else if e.kind == PointerEventKind.up && e.button == PointerEventButton.left && root.scrubbing {
                                 root.seek(root.scrub-pos);
                                 root.scrubbing = false;
                             } else if e.kind == PointerEventKind.cancel {
@@ -794,7 +794,7 @@ export component Library inherits Window {
                                         root.scrubbing = true;
                                         root.scrub-pos = clamp(self.mouse-x / max(self.width, 1px), 0, 1) * root.dur;
                                         root.seek(root.scrub-pos);
-                                    } else if e.kind == PointerEventKind.up {
+                                    } else if e.kind == PointerEventKind.up && e.button == PointerEventButton.left && root.scrubbing {
                                         root.seek(root.scrub-pos);
                                         root.scrubbing = false;
                                     } else if e.kind == PointerEventKind.cancel {
@@ -899,7 +899,7 @@ export component Library inherits Window {
             x: parent.width - self.width - 52px;
             y: 48px;
             width: 300px;
-            height: pop.preferred-height;
+            height: min(pop.preferred-height, root.height - 64px);
             background: Theme.card;
             border-radius: 12px;
             border-width: 1px;
@@ -907,7 +907,12 @@ export component Library inherits Window {
             drop-shadow-blur: 24px;
             drop-shadow-color: #00000080;
             TouchArea { }
-            pop := VerticalLayout {
+            // Scrolls the settings when the window is too short to fit them.
+            Flickable {
+                width: 100%;
+                height: min(pop.preferred-height, root.height - 64px);
+                content-height: pop.preferred-height;
+                pop := VerticalLayout {
                 padding: 16px;
                 spacing: 16px;
                 SettingRow {
@@ -942,6 +947,7 @@ export component Library inherits Window {
                     font-family: Theme.body-font;
                     font-size: 11px;
                     color: Theme.faint;
+                }
                 }
             }
         }

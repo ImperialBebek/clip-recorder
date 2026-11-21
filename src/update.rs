@@ -158,11 +158,12 @@ pub fn apply(rel: &Release) -> Result<PathBuf> {
     }
     let exe = std::env::current_exe()?.canonicalize()?;
     let dir = exe.parent().context("binary has no directory")?;
-    let work = dir.join(".clip-recorder-update");
-    let _ = std::fs::remove_dir_all(&work);
-    std::fs::create_dir_all(&work).with_context(|| {
+    let work = dir.join(format!(".clip-recorder-update-{}", std::process::id()));
+    std::fs::create_dir(&work).with_context(|| {
         format!(
-            "{} is not writable; update with your package manager, or reinstall it",
+            "{} already exists or {} is not writable; remove it and retry, \
+             or update with your package manager / reinstall it",
+            work.display(),
             dir.display()
         )
     })?;
@@ -198,20 +199,41 @@ pub fn apply(rel: &Release) -> Result<PathBuf> {
 fn apply_appimage(rel: &Release, appimage: &Path) -> Result<PathBuf> {
     let dir = appimage.parent().context("binary has no directory")?;
     let tmp = dir.join(format!(
-        ".{}.part",
+        ".{}.{}.part",
         appimage
             .file_name()
             .context("bad $APPIMAGE")?
-            .to_string_lossy()
+            .to_string_lossy(),
+        std::process::id()
     ));
     let result = (|| -> Result<()> {
-        let f = std::fs::File::create(&tmp).with_context(|| {
-            format!(
-                "{} is not writable; move or replace {} yourself",
-                dir.display(),
-                appimage.display()
-            )
-        })?;
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        // A leftover staging file is only removed when it is plainly ours;
+        // anything else (e.g. a symlink someone planted) stops the update.
+        if let Ok(md) = std::fs::symlink_metadata(&tmp) {
+            let own = unsafe { libc::getuid() };
+            if !(md.file_type().is_file() && md.uid() == own) {
+                bail!(
+                    "{} exists and is not a file we created; refusing to update",
+                    tmp.display()
+                );
+            }
+            std::fs::remove_file(&tmp)?;
+        }
+        // create_new fails on an existing path (incl. symlinks) instead of
+        // following it into the AppImage's directory.
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+            .with_context(|| {
+                format!(
+                    "{} is not writable; move or replace {} yourself",
+                    dir.display(),
+                    appimage.display()
+                )
+            })?;
         drop(f);
         curl(&rel.asset_url, "application/octet-stream", Some(&tmp))?;
         verify_sum(rel, &tmp)?;

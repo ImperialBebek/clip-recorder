@@ -28,12 +28,14 @@ impl Player {
     /// frames, so seeking while paused updates the picture); the copy only
     /// happens while `want_frame` says a new frame is needed (preroll frames
     /// always come through); `on_tracks` is called once with the audio track
-    /// names, in audio_N order, when the pipeline has prerolled.
+    /// names, in audio_N order, when the pipeline has prerolled; `on_error` is
+    /// called once with the first pipeline error, if any.
     pub fn open(
         path: &Path,
         on_frame: impl Fn(slint::SharedPixelBuffer<slint::Rgba8Pixel>) + Send + Sync + 'static,
         want_frame: impl Fn() -> bool + Send + Sync + 'static,
         on_tracks: impl FnOnce(Vec<String>) + Send + 'static,
+        on_error: impl FnOnce(String) + Send + 'static,
     ) -> Result<Self> {
         gst::init()?;
         let pipeline = gst::Pipeline::with_name("player");
@@ -132,6 +134,7 @@ impl Player {
         pipeline.set_state(gst::State::Paused)?;
 
         let mut on_tracks = Some(on_tracks);
+        let mut on_error = Some(on_error);
         std::thread::spawn({
             let bus = pipeline.bus().expect("pipeline has a bus");
             let titles = titles.clone();
@@ -181,6 +184,9 @@ impl Player {
                             eprintln!("player: {}", e.error());
                             eos.store(true, Ordering::SeqCst);
                             playing.store(false, Ordering::SeqCst);
+                            if let Some(f) = on_error.take() {
+                                f(e.error().to_string());
+                            }
                         }
                         _ => {}
                     }
@@ -674,6 +680,7 @@ mod tests {
                     eprintln!("{path}: {names:?}");
                     tx.send(names).unwrap();
                 },
+                |_| {},
             )
             .unwrap();
             assert_eq!(
@@ -697,7 +704,8 @@ mod tests {
                     frames.fetch_add(1, Ordering::Relaxed);
                 }
             };
-            let player = Player::open(Path::new(path), on_frame, || true, |_| {}).unwrap();
+            let player =
+                Player::open(Path::new(path), on_frame, || true, |_| {}, |_| {}).unwrap();
             eprintln!("{path}: duration {:?}", player.duration());
             player.play();
             std::thread::sleep(std::time::Duration::from_secs(8));
@@ -718,9 +726,14 @@ mod tests {
     #[ignore = "needs a generated clip"]
     fn dropped_pipeline_is_freed() {
         for _ in 0..5 {
-            let player =
-                Player::open(Path::new("/tmp/clip-play/test.mp4"), |_| {}, || true, |_| {})
-                    .unwrap();
+            let player = Player::open(
+                Path::new("/tmp/clip-play/test.mp4"),
+                |_| {},
+                || true,
+                |_| {},
+                |_| {},
+            )
+            .unwrap();
             let weak = player.pipeline_weak();
             drop(player);
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
@@ -741,6 +754,7 @@ mod tests {
                 let _ = tx.send(buf);
             },
             || true,
+            |_| {},
             |_| {},
         )
         .unwrap();
@@ -801,6 +815,7 @@ mod tests {
             Path::new("/tmp/clip-play/test.mp4"),
             |_| {},
             || true,
+            |_| {},
             |_| {},
         )
         .unwrap();
