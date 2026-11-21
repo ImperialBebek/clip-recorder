@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -9,6 +10,7 @@ use gstreamer_app as gst_app;
 use crate::encoder::Encoder;
 use crate::gst_util::{add_chain, capsfilter, has, make};
 use crate::platform;
+use crate::platform::streams::{self, AppStream, Category, StreamEvent, Watcher};
 use crate::ring::Ring;
 
 pub enum VideoSource {
@@ -55,18 +57,42 @@ pub struct Settings {
     pub kbps: u32,
     pub encoder: Option<Encoder>,
     pub audio: AudioSource,
+    /// Microphone, saved as its own audio track.
+    pub mic: AudioSource,
+    /// PipeWire/Pulse source name for the microphone; `None` = the system default.
+    pub mic_device: Option<String>,
+    /// Per-app tracks in automatic mode.
+    pub track_game: bool,
+    pub track_voice: bool,
+    pub track_other: bool,
+}
+
+/// One per-app category pipeline: a silence-fed mixer that app streams can
+/// join and leave at any time.
+pub struct CategoryShared {
+    pub pipeline: gst::Pipeline,
+    pub mixer: gst::Element,
+    /// pw node id -> (branch bin, ghost pad, requested mixer pad).
+    pub branches: HashMap<u32, (gst::Bin, gst::Pad, gst::Pad)>,
 }
 
 pub struct Recorder {
     pub video: gst::Pipeline,
-    pub audio: Option<gst::Pipeline>,
     pub encoder: Encoder,
     pub audio_name: Option<&'static str>,
+    pub mic_name: Option<&'static str>,
+    /// Aux track titles in ring order, e.g. ["Game", "Voice", "Mic"].
+    pub tracks: Vec<String>,
+    audio: Option<gst::Pipeline>,
+    mic: Option<gst::Pipeline>,
+    cats: Vec<(Category, Arc<Mutex<CategoryShared>>)>,
+    watcher: Option<Watcher>,
 }
 
 pub enum BusEvent {
-    VideoFailed(String),
-    AudioFailed(String),
+    Video(String),
+    Audio(String),
+    Mic(String),
 }
 
 impl Recorder {
@@ -108,48 +134,347 @@ impl Recorder {
             video.ok_or_else(|| anyhow!("no encoder could start, see errors above"))?;
         watch_bus(&video, {
             let events = events.clone();
-            move |msg| events(BusEvent::VideoFailed(msg))
+            move |msg| events(BusEvent::Video(msg))
         });
 
+        // The aux tracks' titles are fixed before any pipeline pushes, so a
+        // packet always lands on the right index. Categories come first in
+        // Game/Voice/Other order, the desktop mix or mic after that.
+        let enabled: [(Category, &str, bool); 3] = [
+            (Category::Game, "Game", settings.track_game),
+            (Category::Voice, "Voice", settings.track_voice),
+            (Category::Other, "Other", settings.track_other),
+        ];
+        let want_mic = settings.mic != AudioSource::None;
+        let mut titles: Vec<String> = Vec::new();
+        match settings.audio {
+            AudioSource::Auto => {
+                titles.extend(enabled.iter().filter(|e| e.2).map(|e| e.1.to_string()));
+            }
+            AudioSource::None => {}
+            // Explicit pipewire/pulse stays a single whole-desktop track.
+            AudioSource::Test => titles.push("Game".into()),
+            _ => titles.push("Desktop".into()),
+        }
+        if want_mic {
+            titles.push("Mic".into());
+        }
+        ring.lock().unwrap().set_aux(&titles);
+
+        let mut cats = Vec::new();
+        let mut watcher = None;
         let mut audio = None;
-        for &src in platform::audio_candidates(settings.audio) {
-            let attempt = build_audio(src, ring.clone())
+        let mut audio_name = None;
+        let mut split = false;
+        if settings.audio == AudioSource::Auto && !titles.iter().any(|t| t != "Mic") {
+            audio_name = None;
+        } else if settings.audio == AudioSource::Auto {
+            let mut failed = false;
+            for (i, (cat, _, _)) in enabled.iter().filter(|e| e.2).enumerate() {
+                match build_category(i, ring.clone()).and_then(|(p, mixer, first)| {
+                    start_checked(&p, &clock, base, first).map(|_| (p, mixer))
+                }) {
+                    Ok((p, mixer)) => {
+                        let shared = Arc::new(Mutex::new(CategoryShared {
+                            pipeline: p.clone(),
+                            mixer,
+                            branches: HashMap::new(),
+                        }));
+                        watch_cat_bus(&shared, {
+                            let events = events.clone();
+                            move |msg| events(BusEvent::Audio(msg))
+                        });
+                        cats.push((*cat, shared));
+                    }
+                    Err(e) => {
+                        eprintln!("{} track could not start: {e:#}", cat.name());
+                        failed = true;
+                        break;
+                    }
+                }
+            }
+            if failed {
+                stop_cats(&mut cats);
+            } else {
+                let shares: Vec<(Category, Arc<Mutex<CategoryShared>>)> = cats.clone();
+                match streams::watch(move |ev| route_event(&shares, ev)) {
+                    Ok(w) => {
+                        watcher = Some(w);
+                        audio_name = Some("auto");
+                        split = true;
+                    }
+                    Err(e) => {
+                        eprintln!("per-app audio unavailable ({e:#}), using the desktop mix");
+                        stop_cats(&mut cats);
+                    }
+                }
+            }
+            if !split {
+                // The category tracks are gone; retitle the first aux track so
+                // the desktop mix is never labelled as game-only audio.
+                titles.clear();
+                titles.push("Desktop".into());
+                if want_mic {
+                    titles.push("Mic".into());
+                }
+                ring.lock().unwrap().set_aux(&titles);
+            }
+        }
+        if !split && settings.audio != AudioSource::None {
+            let want = if settings.audio == AudioSource::Auto
+                && audio_name.is_none()
+                && !enabled.iter().any(|e| e.2)
+            {
+                AudioSource::None
+            } else {
+                settings.audio
+            };
+            for &src in platform::audio_candidates(want) {
+                let attempt = build_audio(src, 0, ring.clone())
+                    .and_then(|(p, first)| start_checked(&p, &clock, base, first).map(|_| p));
+                match attempt {
+                    Ok(p) => {
+                        audio_name = Some(source_name(src));
+                        audio = Some(p);
+                        break;
+                    }
+                    Err(e) => eprintln!("audio {}: {e:#}", source_name(src)),
+                }
+            }
+            if let Some(p) = &audio {
+                watch_bus(p, {
+                    let events = events.clone();
+                    move |msg| events(BusEvent::Audio(msg))
+                });
+            } else if want != AudioSource::None {
+                eprintln!("audio capture unavailable, recording video only");
+            }
+        }
+
+        let mut mic = None;
+        let mic_idx = if want_mic { titles.len() - 1 } else { usize::MAX };
+        for &src in platform::audio_candidates(settings.mic) {
+            let attempt = build_mic(src, settings.mic_device.as_deref(), mic_idx, ring.clone())
                 .and_then(|(p, first)| start_checked(&p, &clock, base, first).map(|_| p));
             match attempt {
                 Ok(p) => {
-                    audio = Some((p, audio_name(src)));
+                    mic = Some((p, source_name(src)));
                     break;
                 }
-                Err(e) => eprintln!("audio {}: {e:#}", audio_name(src)),
+                Err(e) => eprintln!("mic {}: {e:#}", source_name(src)),
             }
         }
-        if let Some((p, _)) = &audio {
-            watch_bus(p, move |msg| events(BusEvent::AudioFailed(msg)));
-        } else if settings.audio != AudioSource::None {
-            eprintln!("audio capture unavailable, recording video only");
+        if let Some((p, _)) = &mic {
+            watch_bus(p, move |msg| events(BusEvent::Mic(msg)));
+        } else if want_mic {
+            eprintln!("microphone unavailable, recording without it");
         }
 
         Ok(Self {
             video,
             encoder,
-            audio_name: audio.as_ref().map(|(_, n)| *n),
-            audio: audio.map(|(p, _)| p),
+            audio_name,
+            mic_name: mic.as_ref().map(|(_, n)| *n),
+            tracks: ring.lock().unwrap().aux.iter().map(|(t, _)| t.clone()).collect(),
+            audio,
+            mic: mic.map(|(p, _)| p),
+            cats,
+            watcher,
         })
     }
 
+    /// "game:1 voice:0 other:2" — live per-app branches, for `status`.
+    pub fn stream_counts(&self) -> String {
+        [Category::Game, Category::Voice, Category::Other]
+            .iter()
+            .map(|cat| {
+                let n = self
+                    .cats
+                    .iter()
+                    .find(|(c, _)| c == cat)
+                    .map(|(_, s)| s.lock().unwrap().branches.len())
+                    .unwrap_or(0);
+                format!("{}:{n}", cat.name())
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     pub fn stop_audio(&mut self) {
+        drop(self.watcher.take());
+        stop_cats(&mut self.cats);
         if let Some(p) = self.audio.take() {
+            let _ = p.set_state(gst::State::Null);
+        }
+    }
+
+    pub fn stop_mic(&mut self) {
+        if let Some(p) = self.mic.take() {
             let _ = p.set_state(gst::State::Null);
         }
     }
 
     pub fn stop(&mut self) {
         self.stop_audio();
+        self.stop_mic();
         let _ = self.video.set_state(gst::State::Null);
     }
 }
 
-fn audio_name(src: AudioSource) -> &'static str {
+fn stop_cats(cats: &mut Vec<(Category, Arc<Mutex<CategoryShared>>)>) {
+    for (_, shared) in cats.drain(..) {
+        let _ = shared.lock().unwrap().pipeline.set_state(gst::State::Null);
+    }
+}
+
+/// Routes a watcher event to the right category pipeline.
+fn route_event(cats: &[(Category, Arc<Mutex<CategoryShared>>)], ev: StreamEvent) {
+    match ev {
+        StreamEvent::Added(stream) => {
+            if let Some((_, shared)) = cats.iter().find(|(c, _)| *c == stream.category) {
+                add_branch(shared, &stream);
+            } else {
+                eprintln!("{} stream ignored: {}", stream.category.name(), stream.name);
+            }
+        }
+        StreamEvent::Removed(id) => {
+            for (_, shared) in cats {
+                remove_branch(shared, id);
+            }
+        }
+    }
+}
+
+/// Adds one app's stream to a category mixer as `pipewiresrc` in a branch bin.
+fn add_branch(shared: &Arc<Mutex<CategoryShared>>, stream: &AppStream) {
+    let mut s = shared.lock().unwrap();
+    if s.branches.contains_key(&stream.id) {
+        return;
+    }
+    let build = || -> Result<(gst::Bin, gst::Pad, gst::Pad)> {
+        let bin = gst::Bin::with_name(&format!("app-{}", stream.id));
+        let src = make(
+            "pipewiresrc",
+            &[
+                ("target-object", stream.serial.as_str()),
+                ("do-timestamp", "true"),
+                (
+                    "stream-properties",
+                    "props,media.category=(string)Capture,node.dont-reconnect=(boolean)true,node.dont-fallback=(boolean)true",
+                ),
+            ],
+        )?;
+        let conv = make("audioconvert", &[])?;
+        let resample = make("audioresample", &[])?;
+        let caps = capsfilter("audio/x-raw,rate=48000,channels=2")?;
+        let queue = make("queue", &[])?;
+        bin.add_many([&src, &conv, &resample, &caps, &queue])?;
+        gst::Element::link_many([&src, &conv, &resample, &caps, &queue])?;
+        let ghost = gst::GhostPad::with_target(&queue.static_pad("src").unwrap())?;
+        bin.add_pad(ghost.upcast_ref::<gst::Pad>())?;
+        s.pipeline.add(&bin)?;
+        let sink = match s.mixer.request_pad_simple("sink_%u") {
+            Some(sink) => sink,
+            None => {
+                let _ = s.pipeline.remove(&bin);
+                bail!("audiomixer gave no sink pad");
+            }
+        };
+        if let Err(e) = ghost.link(&sink) {
+            s.mixer.release_request_pad(&sink);
+            let _ = s.pipeline.remove(&bin);
+            return Err(e.into());
+        }
+        Ok((bin, ghost.upcast(), sink))
+    };
+    match build() {
+        Ok((bin, ghost, sink)) => {
+            // pipewiresrc blocks in its state change until the stream is
+            // linked, so never under the lock or on the watcher thread.
+            bin.call_async(|b| {
+                let _ = b.sync_state_with_parent();
+            });
+            s.branches.insert(stream.id, (bin, ghost, sink));
+            eprintln!(
+                "{} stream added: {} (#{})",
+                stream.category.name(),
+                stream.name,
+                stream.id
+            );
+        }
+        Err(e) => eprintln!("{} stream {} failed to add: {e:#}", stream.category.name(), stream.name),
+    }
+}
+
+/// Removes a branch bin and frees its mixer pad.
+fn remove_branch(shared: &Arc<Mutex<CategoryShared>>, id: u32) {
+    let mut s = shared.lock().unwrap();
+    let Some((bin, ghost, sink)) = s.branches.remove(&id) else {
+        return;
+    };
+    let _ = ghost.unlink(&sink);
+    s.mixer.release_request_pad(&sink);
+    let _ = s.pipeline.remove(&bin);
+    bin.call_async(|b| {
+        let _ = b.set_state(gst::State::Null);
+    });
+    eprintln!("app stream removed: #{id}");
+}
+
+/// Like `watch_bus`, but an error inside an `app-*` branch bin only removes
+/// that branch; the category track keeps running on its silence source.
+fn watch_cat_bus(shared: &Arc<Mutex<CategoryShared>>, on_fail: impl Fn(String) + Send + 'static) {
+    let bus = shared
+        .lock()
+        .unwrap()
+        .pipeline
+        .bus()
+        .expect("pipeline has a bus");
+    let shared = shared.clone();
+    std::thread::spawn(move || {
+        for msg in bus.iter_timed(gst::ClockTime::NONE) {
+            match msg.view() {
+                gst::MessageView::Error(e) => {
+                    let text = format!(
+                        "{} ({})",
+                        e.error(),
+                        e.debug().map(|d| d.to_string()).unwrap_or_default()
+                    );
+                    if let Some(id) = branch_of(&msg) {
+                        eprintln!("app stream #{id} failed ({text}), removing its branch");
+                        remove_branch(&shared, id);
+                        continue;
+                    }
+                    on_fail(text);
+                    return;
+                }
+                gst::MessageView::Eos(_) => {
+                    on_fail("stream ended".into());
+                    return;
+                }
+                _ => {}
+            }
+        }
+    });
+}
+
+/// The `app-<id>` bin an error message came from, if any.
+fn branch_of(msg: &gst::Message) -> Option<u32> {
+    let mut parent = msg.src()?.downcast_ref::<gst::Element>()?.parent();
+    while let Some(obj) = parent {
+        if let Some(id) = obj
+            .name()
+            .strip_prefix("app-")
+            .and_then(|n| n.parse().ok())
+        {
+            return Some(id);
+        }
+        parent = obj.parent();
+    }
+    None
+}
+
+fn source_name(src: AudioSource) -> &'static str {
     match src {
         AudioSource::PipeWire => "pipewire",
         AudioSource::Pulse => "pulse",
@@ -225,6 +550,7 @@ fn build_video(
 
 fn build_audio(
     src: AudioSource,
+    aux: usize,
     ring: Arc<Mutex<Ring>>,
 ) -> Result<(gst::Pipeline, mpsc::Receiver<()>)> {
     let pipeline = gst::Pipeline::with_name("audio");
@@ -236,10 +562,62 @@ fn build_audio(
         capsfilter("audio/x-raw,rate=48000,channels=2")?,
     ];
     chain.extend(audio_encoder()?);
-    let (sink, first) = appsink(move |caps, buf| ring.lock().unwrap().push_audio(caps, buf));
+    let (sink, first) =
+        appsink(move |caps, buf| ring.lock().unwrap().push_aux(aux, caps, buf));
     chain.push(sink);
     add_chain(&pipeline, &chain)?;
     Ok((pipeline, first))
+}
+
+/// Same shape as `build_audio`, sourced from the microphone instead.
+fn build_mic(
+    src: AudioSource,
+    device: Option<&str>,
+    aux: usize,
+    ring: Arc<Mutex<Ring>>,
+) -> Result<(gst::Pipeline, mpsc::Receiver<()>)> {
+    let pipeline = gst::Pipeline::with_name("mic");
+    let source = platform::mic_element(src, device)?;
+    let mut chain = vec![
+        source,
+        make("audioconvert", &[])?,
+        make("audioresample", &[])?,
+        capsfilter("audio/x-raw,rate=48000,channels=2")?,
+    ];
+    chain.extend(audio_encoder()?);
+    let (sink, first) =
+        appsink(move |caps, buf| ring.lock().unwrap().push_aux(aux, caps, buf));
+    chain.push(sink);
+    add_chain(&pipeline, &chain)?;
+    Ok((pipeline, first))
+}
+
+/// A per-app category track: silence keeps it continuous, and each playing
+/// app joins the mixer as a removable `pipewiresrc` branch.
+fn build_category(
+    aux: usize,
+    ring: Arc<Mutex<Ring>>,
+) -> Result<(gst::Pipeline, gst::Element, mpsc::Receiver<()>)> {
+    let pipeline = gst::Pipeline::with_name("category");
+    let silence = make(
+        "audiotestsrc",
+        &[("wave", "silence"), ("is-live", "true")],
+    )?;
+    let mixer = make("audiomixer", &[])?;
+    let mut chain = vec![
+        mixer.clone(),
+        make("audioconvert", &[])?,
+        make("audioresample", &[])?,
+        capsfilter("audio/x-raw,rate=48000,channels=2")?,
+    ];
+    chain.extend(audio_encoder()?);
+    let (sink, first) =
+        appsink(move |caps, buf| ring.lock().unwrap().push_aux(aux, caps, buf));
+    chain.push(sink);
+    pipeline.add(&silence)?;
+    add_chain(&pipeline, &chain)?;
+    silence.link(&mixer)?;
+    Ok((pipeline, mixer, first))
 }
 
 /// AAC plays everywhere an MP4 does; Opus is the fallback when no AAC encoder is installed.
@@ -324,4 +702,42 @@ fn watch_bus(pipeline: &gst::Pipeline, on_fail: impl Fn(String) + Send + 'static
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    /// Records the test video plus all per-app tracks and a test-tone "Mic"
+    /// against the real PipeWire session, then muxes an MP4 to /tmp/clip-test.
+    /// Play music in an app classified Other while this runs.
+    #[test]
+    #[ignore = "records live PipeWire app streams; run manually"]
+    fn split_capture() {
+        gst::init().unwrap();
+        let ring = Arc::new(Mutex::new(Ring::new(gst::ClockTime::from_seconds(30))));
+        let settings = Settings {
+            fps: 30,
+            kbps: 4000,
+            encoder: None,
+            audio: AudioSource::Auto,
+            mic: AudioSource::Test,
+            mic_device: None,
+            track_game: true,
+            track_voice: true,
+            track_other: true,
+        };
+        let mut rec = Recorder::start(&VideoSource::Test, &settings, ring.clone(), |_| {})
+            .expect("recorder could not start");
+        assert_eq!(rec.tracks, ["Game", "Voice", "Other", "Mic"]);
+        std::thread::sleep(Duration::from_secs(12));
+        eprintln!("streams: {}", rec.stream_counts());
+        assert_ne!(rec.stream_counts(), "game:0 voice:0 other:0", "no app stream attached");
+        let snap = ring.lock().unwrap().snapshot();
+        rec.stop();
+        std::fs::create_dir_all("/tmp/clip-test").unwrap();
+        let secs = crate::save::write_mp4(snap, Path::new("/tmp/clip-test/split.mp4")).unwrap();
+        eprintln!("wrote {}s to /tmp/clip-test/split.mp4", secs.seconds());
+    }
 }

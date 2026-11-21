@@ -5,6 +5,7 @@ mod daemon;
 mod encoder;
 mod gst_util;
 mod platform;
+mod player;
 mod ring;
 mod save;
 mod sysinfo;
@@ -41,7 +42,10 @@ OPTIONS (override ~/.config/clip-recorder/config for this run):
     -f, --fps <N>             frame rate cap                      [default: 60]
     -b, --bitrate <KBPS>      video bitrate, overrides the quality preset
     -e, --encoder <NAME>      auto, va, vaapi, nvenc, x264        [default: auto]
-    -a, --audio <SOURCE>      auto, pipewire, pulse, none         [default: auto]
+    -a, --audio <MODE>        auto (per-app tracks), pipewire|pulse (whole desktop, one track), none
+                              [default: auto]
+    -m, --mic <SOURCE>        microphone, its own audio track     [default: auto]
+        --mic-device <NAME>   microphone to record, from the library's list [default: system default]
     -o, --output <DIR>        where clips go                      [default: ~/Videos/Clips]
     -k, --hotkey <COMBO>      global save hotkey                  [default: alt+s]
         --no-hotkey           only save via `clip-recorder save` or SIGUSR1
@@ -112,6 +116,10 @@ fn parse_args() -> Result<Cmd> {
             Short('a') | Long("audio") => {
                 cfg.audio = AudioSource::parse(&parser.value()?.string()?)?
             }
+            Short('m') | Long("mic") => {
+                cfg.mic = AudioSource::parse(&parser.value()?.string()?)?
+            }
+            Long("mic-device") => cfg.mic_device = parser.value()?.string()?,
             Short('o') | Long("output") => cfg.output = parser.value()?.into(),
             Short('k') | Long("hotkey") => cfg.hotkey = parser.value()?.string()?,
             Long("no-hotkey") => flags.hotkey = false,

@@ -96,11 +96,20 @@ impl Daemon {
             (true, AudioSource::Auto) => AudioSource::Test,
             (_, a) => a,
         };
+        let mic = match (self.flags.test_source, self.cfg.mic) {
+            (true, AudioSource::Auto) => AudioSource::Test,
+            (_, m) => m,
+        };
         Settings {
             fps: self.cfg.fps,
             kbps: self.flags.kbps.unwrap_or(self.cfg.quality.kbps()),
             encoder: self.cfg.encoder,
             audio,
+            mic,
+            mic_device: (!self.cfg.mic_device.is_empty()).then(|| self.cfg.mic_device.clone()),
+            track_game: self.cfg.track_game,
+            track_voice: self.cfg.track_voice,
+            track_other: self.cfg.track_other,
         }
     }
 
@@ -130,6 +139,14 @@ impl Daemon {
             rec.encoder.name(),
             rec.audio_name.unwrap_or("off"),
         );
+        if let Some(mic) = rec.mic_name {
+            let dev = if self.cfg.mic_device.is_empty() {
+                "default"
+            } else {
+                self.cfg.mic_device.as_str()
+            };
+            eprintln!("microphone: {mic} ({dev})");
+        }
         self.recorder = Some(rec);
         Ok(())
     }
@@ -203,6 +220,20 @@ impl Daemon {
                 rec.and_then(|r| r.audio_name).unwrap_or("off").into(),
             ),
             ("audio_setting", self.cfg.audio.name().into()),
+            (
+                "mic",
+                rec.and_then(|r| r.mic_name).unwrap_or("off").into(),
+            ),
+            ("mic_setting", self.cfg.mic.name().into()),
+            ("mic_device", self.cfg.mic_device.clone()),
+            (
+                "tracks",
+                rec.map(|r| r.tracks.join(",")).unwrap_or_default(),
+            ),
+            (
+                "streams",
+                rec.map(|r| r.stream_counts()).unwrap_or_default(),
+            ),
             ("output", config::tilde(&self.cfg.output)),
             ("output_abs", self.cfg.output.display().to_string()),
             ("hotkey", pretty_combo(&self.cfg.hotkey)),
@@ -265,7 +296,12 @@ impl Daemon {
         let restart = new.fps != self.cfg.fps
             || new.quality != self.cfg.quality
             || new.encoder != self.cfg.encoder
-            || new.audio != self.cfg.audio;
+            || new.audio != self.cfg.audio
+            || new.mic != self.cfg.mic
+            || new.mic_device != self.cfg.mic_device
+            || new.track_game != self.cfg.track_game
+            || new.track_voice != self.cfg.track_voice
+            || new.track_other != self.cfg.track_other;
         if new.duration != self.cfg.duration {
             self.ring.lock().unwrap().set_window(secs(new.duration));
         }
@@ -679,6 +715,7 @@ pub async fn run(cfg: Config, flags: Flags) -> Result<()> {
             setup: d.source.is_none() && d.kwin.is_none(),
             waiting: d.source.is_none() && d.kwin.is_some(),
             pick: d.kwin.is_none(),
+            last_click: None,
         })
         .await
     } else {
@@ -688,7 +725,7 @@ pub async fn run(cfg: Config, flags: Flags) -> Result<()> {
     // Opening the app by hand shows the library; autostart stays in the tray,
     // except until the welcome screen has been seen once.
     if d.flags.ui && !d.flags.test_source && (!d.flags.background || !crate::ui::onboarded()) {
-        tray::open_window("library");
+        tray::open_window("library", None);
     }
 
     let (update_tx, mut update_rx) = mpsc::unbounded_channel::<String>();
@@ -848,7 +885,7 @@ pub async fn run(cfg: Config, flags: Flags) -> Result<()> {
                 }
             }
             Some(ev) = bus_rx.recv() => match ev {
-                BusEvent::VideoFailed(e) if d.kwin.is_some() => {
+                BusEvent::Video(e) if d.kwin.is_some() => {
                     // The window's stream ended under the recorder; wait for the next game.
                     eprintln!("game window capture stopped: {e}");
                     if let Some((uuid, _)) = &d.window {
@@ -857,11 +894,17 @@ pub async fn run(cfg: Config, flags: Flags) -> Result<()> {
                     d.drop_window();
                     sync_tray(&tray, &d).await;
                 }
-                BusEvent::VideoFailed(e) => break Err(anyhow::anyhow!("video capture stopped: {e}")),
-                BusEvent::AudioFailed(e) => {
+                BusEvent::Video(e) => break Err(anyhow::anyhow!("video capture stopped: {e}")),
+                BusEvent::Audio(e) => {
                     eprintln!("audio capture stopped ({e}), continuing with video only");
                     if let Some(r) = d.recorder.as_mut() {
                         r.stop_audio();
+                    }
+                }
+                BusEvent::Mic(e) => {
+                    eprintln!("microphone capture stopped ({e}), continuing without it");
+                    if let Some(r) = d.recorder.as_mut() {
+                        r.stop_mic();
                     }
                 }
             },
@@ -934,6 +977,7 @@ pub async fn run(cfg: Config, flags: Flags) -> Result<()> {
     };
     d.stop();
     drop(stream);
+    ipc::tell_library("quit");
     let _ = std::fs::remove_file(ipc::socket_path());
     outcome
 }

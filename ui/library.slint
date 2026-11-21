@@ -10,6 +10,20 @@ export struct ClipCard {
     selected: bool,
 }
 
+export struct PlayerTrack {
+    name: string,
+    audio: bool,
+    muted: bool,
+    wave: string,
+    volume: float,
+}
+
+export struct ToggleRow {
+    label: string,
+    detail: string,
+    on: bool,
+}
+
 component Segmented inherits Rectangle {
     in property <[string]> options;
     in property <int> selected;
@@ -39,6 +53,171 @@ component Segmented inherits Rectangle {
             }
             ta := TouchArea { mouse-cursor: pointer; clicked => { root.picked(i); } }
         }
+    }
+}
+
+component Choices inherits VerticalLayout {
+    in property <[string]> options;
+    in property <int> selected;
+    callback picked(int);
+    spacing: 2px;
+    Rectangle {
+        background: Theme.sidebar;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.divider;
+        VerticalLayout {
+            padding: 3px;
+            spacing: 2px;
+            for o[i] in options: Rectangle {
+                height: 28px;
+                border-radius: 6px;
+                background: i == selected ? Theme.key-bg : ta.has-hover ? Theme.card : transparent;
+                border-width: i == selected ? 1px : 0;
+                border-color: Theme.key-border;
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    spacing: 8px;
+                    Text {
+                        text: o;
+                        font-family: Theme.body-font;
+                        font-size: 12px;
+                        font-weight: i == selected ? 600 : 400;
+                        color: i == selected ? Theme.text : Theme.muted;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                    }
+                    if i == selected: Icon {
+                        name: "check";
+                        width: 12px;
+                        height: 12px;
+                        stroke: Theme.text;
+                        y: (parent.height - self.height) / 2;
+                    }
+                }
+                ta := TouchArea { mouse-cursor: pointer; clicked => { root.picked(i); } }
+            }
+        }
+    }
+}
+
+component Toggles inherits VerticalLayout {
+    in property <[ToggleRow]> rows;
+    callback toggled(int);
+    spacing: 2px;
+    Rectangle {
+        background: Theme.sidebar;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.divider;
+        VerticalLayout {
+            padding: 3px;
+            spacing: 2px;
+            for r[i] in rows: Rectangle {
+                height: 28px;
+                border-radius: 6px;
+                background: r.on ? Theme.key-bg : ta.has-hover ? Theme.card : transparent;
+                border-width: r.on ? 1px : 0;
+                border-color: Theme.key-border;
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    spacing: 8px;
+                    Text {
+                        text: r.label;
+                        font-family: Theme.body-font;
+                        font-size: 12px;
+                        font-weight: r.on ? 600 : 400;
+                        color: r.on ? Theme.text : Theme.muted;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: r.detail;
+                        font-family: Theme.body-font;
+                        font-size: 11px;
+                        color: Theme.muted;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                    }
+                    if r.on: Icon {
+                        name: "check";
+                        width: 12px;
+                        height: 12px;
+                        stroke: Theme.text;
+                        y: (parent.height - self.height) / 2;
+                    }
+                }
+                ta := TouchArea { mouse-cursor: pointer; clicked => { root.toggled(i); } }
+            }
+        }
+    }
+}
+
+component ResizeHandle inherits TouchArea {
+    in property <int> dir;
+    in property <MouseCursor> cursor;
+    callback resize(int, length, length);
+    mouse-cursor: cursor;
+    pointer-event(e) => {
+        if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+            root.resize(dir, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+        }
+    }
+}
+
+component VolumeSlider inherits Rectangle {
+    in property <float> value;
+    in property <float> max: 1;
+    callback changed(float);
+    height: 20px;
+    Rectangle {
+        x: 0;
+        y: 8px;
+        width: parent.width;
+        height: 4px;
+        border-radius: 2px;
+        background: Theme.key-bg;
+        Rectangle {
+            x: 0;
+            width: parent.width * clamp(root.value / root.max, 0, 1);
+            height: 100%;
+            border-radius: 2px;
+            background: Theme.muted;
+        }
+    }
+    if root.max > 1: Rectangle {
+        x: parent.width / root.max - 0.5px;
+        y: 6px;
+        width: 1px;
+        height: 8px;
+        background: Theme.divider;
+    }
+    Rectangle {
+        x: clamp(root.value / root.max * parent.width - 5px, 0px, parent.width - 10px);
+        y: 5px;
+        width: 10px;
+        height: 10px;
+        border-radius: 5px;
+        background: Theme.text;
+    }
+    TouchArea {
+        moved => {
+            if self.pressed {
+                root.changed(root.pick(self.mouse-x));
+            }
+        }
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                root.changed(root.pick(self.mouse-x));
+            }
+        }
+    }
+    // Snap to exactly 1.0 within 4% of max of it.
+    pure function pick(x: length) -> float {
+        abs(clamp(x / root.width, 0, 1) * root.max - 1) < 0.04 * root.max ? 1 : clamp(x / root.width, 0, 1) * root.max
     }
 }
 
@@ -200,6 +379,12 @@ export component Library inherits Window {
     in property <int> duration: 1;
     in property <string> quality-note;
     in property <string> duration-note;
+    in property <[string]> mics;
+    in property <int> mic: 1;
+    callback set-mic(int);
+    callback load-mics();
+    in property <[ToggleRow]> app-tracks;
+    callback toggle-app-track(int);
     in-out property <bool> popover;
     in-out property <bool> select-mode;
     // Ctrl or Shift is down: show the selection circles as a hint.
@@ -219,10 +404,45 @@ export component Library inherits Window {
     // First start: a welcome card over the library explaining how the app works.
     in-out property <bool> onboarding;
     callback finish-onboarding();
+    // The built-in player: a page that replaces the grid for the open clip.
+    in-out property <bool> player-open;
+    in-out property <bool> fullscreen;
+    in property <string> player-title;
+    in property <string> player-time;
+    in property <[PlayerTrack]> tracks;
+    in property <[image]> filmstrip;
+    in property <image> frame;
+    in property <float> pos;
+    in property <float> dur;
+    in-out property <bool> scrubbing;
+    in-out property <float> scrub-pos;
+    property <float> shown-frac: dur > 0 ? clamp((scrubbing ? scrub-pos : pos) / dur, 0, 1) : 0;
+    in property <bool> playing;
+    in property <float> volume: 1;
+    in property <bool> muted;
+    in-out property <bool> player-confirming;
+    callback player-back();
+    callback toggle-play();
+    callback seek(float);
+    callback prev-clip();
+    callback next-clip();
+    callback set-volume(float);
+    callback toggle-mute();
+    callback toggle-track(int);
+    callback set-track-volume(int, float);
+    callback open-external();
+    callback show-folder();
+    callback delete-current();
+    callback toggle-fullscreen();
     // False when the recorder follows the game window and there is no screen to pick.
     in property <bool> screen-picker: true;
-    callback drag();
+    // Both take the pointer's window position.
+    callback drag(length, length);
+    // 0 N, 1 S, 2 W, 3 E, 4 NW, 5 NE, 6 SW, 7 SE.
+    callback resize(int, length, length);
     callback close-window();
+
+    changed popover => { if popover { root.load-mics(); } }
 
     title: "Clips";
     preferred-width: 960px;
@@ -240,6 +460,29 @@ export component Library inherits Window {
         }
         key-pressed(e) => {
             root.mod-held = e.modifiers.control || e.modifiers.shift;
+            if root.player-open {
+                if e.text == Key.Escape {
+                    if root.fullscreen { root.toggle-fullscreen(); }
+                    else if root.player-confirming { root.player-confirming = false; }
+                    else { root.player-back(); }
+                    return accept;
+                }
+                if root.player-confirming {
+                    if e.text == Key.Return && !e.repeat { root.delete-current(); }
+                    return accept;
+                }
+                if e.text == " " || e.text == "k" || e.text == "K" { root.toggle-play(); return accept; }
+                if e.text == Key.LeftArrow { root.seek(max(root.pos - 5, 0)); return accept; }
+                if e.text == Key.RightArrow { root.seek(min(root.pos + 5, root.dur)); return accept; }
+                if e.text == Key.UpArrow { root.set-volume(min(root.volume + 0.1, 1)); return accept; }
+                if e.text == Key.DownArrow { root.set-volume(max(root.volume - 0.1, 0)); return accept; }
+                if e.text == "m" || e.text == "M" { root.toggle-mute(); return accept; }
+                if e.text == "f" || e.text == "F" { root.toggle-fullscreen(); return accept; }
+                if e.text == Key.PageUp { root.prev-clip(); return accept; }
+                if e.text == Key.PageDown { root.next-clip(); return accept; }
+                if e.text == Key.Delete && !e.repeat { root.player-confirming = true; return accept; }
+                return accept;
+            }
             if e.text == Key.Escape {
                 if confirming { confirming = false; } else if select-mode { root.toggle-select-mode(); } else if popover { popover = false; } else { root.close-window(); }
                 return accept;
@@ -265,30 +508,31 @@ export component Library inherits Window {
 
         VerticalLayout {
             // Header doubles as the title bar.
-            Rectangle {
+            if !root.fullscreen: Rectangle {
                 height: 52px;
-                TouchArea { pointer-event(e) => { if e.kind == PointerEventKind.down && e.button == PointerEventButton.left { root.drag(); } } }
+                TouchArea { pointer-event(e) => { if e.kind == PointerEventKind.down && e.button == PointerEventButton.left { root.drag(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y); } } }
                 HorizontalLayout {
                     padding-left: 20px;
                     padding-right: 12px;
                     spacing: 12px;
-                    RecordMark { size: 16px; y: (parent.height - 16px) / 2; }
-                    Text { text: "Clips"; font-family: Theme.body-font; font-size: 16px; font-weight: 600; color: Theme.text; vertical-alignment: center; horizontal-stretch: 1; }
+                    if root.player-open: IconButton { y: (parent.height - self.height) / 2; icon: "back"; clicked => { root.player-back(); } }
+                    if !root.player-open: RecordMark { size: 16px; y: (parent.height - 16px) / 2; }
+                    Text { text: root.player-open ? root.player-title : "Clips"; font-family: Theme.body-font; font-size: 16px; font-weight: 600; color: Theme.text; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
                     LivePill {
                         y: (parent.height - self.height) / 2;
                         live: root.live;
                         label: root.state-label;
                         TouchArea { mouse-cursor: root.live ? default : pointer; clicked => { if !root.live { root.start-recorder(); } } }
                     }
-                    if clips.length > 0: IconButton { y: (parent.height - self.height) / 2; icon: "check"; active: root.select-mode; clicked => { root.toggle-select-mode(); } }
-                    IconButton { y: (parent.height - self.height) / 2; icon: "sliders"; active: root.popover; clicked => { root.popover = !root.popover; } }
+                    if !root.player-open && clips.length > 0: IconButton { y: (parent.height - self.height) / 2; icon: "check"; active: root.select-mode; clicked => { root.toggle-select-mode(); } }
+                    if !root.player-open: IconButton { y: (parent.height - self.height) / 2; icon: "sliders"; active: root.popover; clicked => { root.popover = !root.popover; } }
                     Rectangle { width: 1px; height: 20px; y: (parent.height - 20px) / 2; background: Theme.border; }
                     IconButton { y: (parent.height - self.height) / 2; icon: "close"; round: true; clicked => { root.close-window(); } }
                 }
             }
-            Rectangle { height: 1px; background: Theme.divider; }
+            if !root.fullscreen: Rectangle { height: 1px; background: Theme.divider; }
 
-            if clips.length == 0: Rectangle {
+            if !root.player-open && clips.length == 0: Rectangle {
                 vertical-stretch: 1;
                 VerticalLayout {
                     alignment: center;
@@ -305,7 +549,7 @@ export component Library inherits Window {
                 }
             }
 
-            if clips.length > 0: VerticalLayout {
+            if !root.player-open && clips.length > 0: VerticalLayout {
                 vertical-stretch: 1;
                 HorizontalLayout {
                     padding-left: 24px;
@@ -388,8 +632,189 @@ export component Library inherits Window {
                 }
             }
 
-            Rectangle { height: 1px; background: Theme.divider; }
-            if !select-mode: HorizontalLayout {
+            if root.player-open: VerticalLayout {
+                vertical-stretch: 1;
+                Rectangle {
+                    vertical-stretch: 1;
+                    background: black;
+                    Image {
+                        width: 100%;
+                        height: 100%;
+                        source: root.frame;
+                        image-fit: contain;
+                    }
+                    TouchArea {
+                        clicked => { root.toggle-play(); }
+                        double-clicked => { root.toggle-fullscreen(); }
+                    }
+                }
+                if root.fullscreen: Rectangle {
+                    height: 6px;
+                    background: Theme.divider;
+                    Rectangle {
+                        x: 0;
+                        y: 0;
+                        height: 100%;
+                        width: parent.width * root.shown-frac;
+                        background: Theme.red;
+                    }
+                    TouchArea {
+                        pointer-event(e) => {
+                            if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                                root.scrubbing = true;
+                                root.scrub-pos = clamp(self.mouse-x / max(self.width, 1px), 0, 1) * root.dur;
+                                root.seek(root.scrub-pos);
+                            } else if e.kind == PointerEventKind.up {
+                                root.seek(root.scrub-pos);
+                                root.scrubbing = false;
+                            } else if e.kind == PointerEventKind.cancel {
+                                root.scrubbing = false;
+                            }
+                        }
+                        moved => {
+                            if self.pressed {
+                                root.scrub-pos = clamp(self.mouse-x / max(self.width, 1px), 0, 1) * root.dur;
+                                root.seek(root.scrub-pos);
+                            }
+                        }
+                    }
+                }
+                Rectangle {
+                    height: 44px;
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        spacing: 8px;
+                        IconButton { y: (parent.height - self.height) / 2; icon: "prev"; clicked => { root.prev-clip(); } }
+                        IconButton { y: (parent.height - self.height) / 2; icon: root.playing ? "pause" : "play"; clicked => { root.toggle-play(); } }
+                        IconButton { y: (parent.height - self.height) / 2; icon: "next"; clicked => { root.next-clip(); } }
+                        Text { text: root.player-time; font-family: Theme.mono-font; font-size: 12px; color: Theme.muted; vertical-alignment: center; }
+                        Rectangle { horizontal-stretch: 1; }
+                        if !root.player-confirming: IconButton { y: (parent.height - self.height) / 2; icon: root.muted ? "mute" : "volume"; clicked => { root.toggle-mute(); } }
+                        if !root.player-confirming: VolumeSlider {
+                            y: (parent.height - self.height) / 2;
+                            width: 80px;
+                            value: root.volume;
+                            changed(v) => { root.set-volume(v); }
+                        }
+                        if !root.player-confirming: IconButton { y: (parent.height - self.height) / 2; icon: "external"; clicked => { root.open-external(); } }
+                        if !root.player-confirming: IconButton { y: (parent.height - self.height) / 2; icon: "folder"; clicked => { root.show-folder(); } }
+                        if !root.player-confirming: IconButton { y: (parent.height - self.height) / 2; icon: "trash"; clicked => { root.player-confirming = true; } }
+                        if !root.player-confirming: IconButton { y: (parent.height - self.height) / 2; icon: "fullscreen"; clicked => { root.toggle-fullscreen(); } }
+                        if root.player-confirming: Text { text: "Delete this clip? This can't be undone."; font-family: Theme.body-font; font-size: 12px; font-weight: 600; color: Theme.red; vertical-alignment: center; }
+                        if root.player-confirming: TextButton { label: "Keep"; clicked => { root.player-confirming = false; } }
+                        if root.player-confirming: TextButton { label: "Delete"; danger: true; clicked => { root.delete-current(); } }
+                    }
+                }
+                if !root.fullscreen: VerticalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    padding-bottom: 16px;
+                    spacing: 2px;
+                    for t[i] in root.tracks: HorizontalLayout {
+                        spacing: 8px;
+                        height: t.audio ? 36px : 48px;
+                        HorizontalLayout {
+                            width: 188px;
+                            spacing: 4px;
+                            Text {
+                                text: t.name;
+                                font-family: Theme.body-font;
+                                font-size: 12px;
+                                font-weight: 600;
+                                color: Theme.text;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                                overflow: elide;
+                            }
+                            if t.audio: IconButton {
+                                y: (parent.height - self.height) / 2;
+                                round: true;
+                                icon: t.muted ? "mute" : "volume";
+                                clicked => { root.toggle-track(i); }
+                            }
+                            if t.audio: VolumeSlider {
+                                y: (parent.height - self.height) / 2;
+                                width: 56px;
+                                max: 2;
+                                value: t.volume;
+                                changed(v) => { root.set-track-volume(i, v); }
+                            }
+                            if t.audio: Text {
+                                text: "\{round(t.volume * 100)}%";
+                                font-family: Theme.mono-font;
+                                font-size: 10px;
+                                color: Theme.muted;
+                                width: 34px;
+                                horizontal-alignment: right;
+                                vertical-alignment: center;
+                            }
+                        }
+                        lane := Rectangle {
+                            horizontal-stretch: 1;
+                            background: Theme.sidebar;
+                            border-radius: 6px;
+                            clip: true;
+                            opacity: t.muted ? 0.4 : 1;
+                            if !t.audio: HorizontalLayout {
+                                for img in root.filmstrip: Image {
+                                    horizontal-stretch: 1;
+                                    source: img;
+                                    image-fit: cover;
+                                }
+                            }
+                            if t.audio: Path {
+                                x: 0;
+                                y: 0;
+                                width: parent.width;
+                                height: parent.height;
+                                commands: t.wave;
+                                viewbox-width: 600;
+                                viewbox-height: 2;
+                                fill: Theme.muted;
+                                stroke: transparent;
+                            }
+                            Rectangle {
+                                x: 0;
+                                y: 0;
+                                height: 100%;
+                                width: parent.width * root.shown-frac;
+                                background: #ffffff0d;
+                            }
+                            Rectangle {
+                                x: parent.width * root.shown-frac - 1px;
+                                y: 0;
+                                width: 2px;
+                                height: 100%;
+                                background: Theme.red;
+                            }
+                            ta := TouchArea {
+                                pointer-event(e) => {
+                                    if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                                        root.scrubbing = true;
+                                        root.scrub-pos = clamp(self.mouse-x / max(self.width, 1px), 0, 1) * root.dur;
+                                        root.seek(root.scrub-pos);
+                                    } else if e.kind == PointerEventKind.up {
+                                        root.seek(root.scrub-pos);
+                                        root.scrubbing = false;
+                                    } else if e.kind == PointerEventKind.cancel {
+                                        root.scrubbing = false;
+                                    }
+                                }
+                                moved => {
+                                    if self.pressed {
+                                        root.scrub-pos = clamp(self.mouse-x / max(self.width, 1px), 0, 1) * root.dur;
+                                        root.seek(root.scrub-pos);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !root.player-open: Rectangle { height: 1px; background: Theme.divider; }
+            if !root.player-open && !select-mode: HorizontalLayout {
                 height: 44px;
                 alignment: center;
                 spacing: 6px;
@@ -397,7 +822,7 @@ export component Library inherits Window {
                 Keys { keys: root.hotkey; padding-top: 12px; padding-bottom: 12px; }
                 Text { text: "in any game to save the last \{root.seconds} s"; font-family: Theme.body-font; font-size: 12px; color: Theme.muted; vertical-alignment: center; }
             }
-            if select-mode: HorizontalLayout {
+            if !root.player-open && select-mode: HorizontalLayout {
                 height: 44px;
                 padding-left: 24px;
                 padding-right: 24px;
@@ -495,6 +920,16 @@ export component Library inherits Window {
                     note: root.duration-note;
                     Segmented { mono: true; options: ["30 s", "60 s", "120 s"]; selected: root.duration; picked(i) => { root.set-duration(i); } }
                 }
+                SettingRow {
+                    title: "App audio";
+                    note: "own track each";
+                    Toggles { rows: root.app-tracks; toggled(i) => { root.toggle-app-track(i); } }
+                }
+                SettingRow {
+                    title: "Microphone";
+                    note: "own audio track";
+                    Choices { options: root.mics; selected: root.mic; picked(i) => { root.set-mic(i); } }
+                }
                 if root.screen-picker: SettingRow {
                     title: "Screen";
                     note: "the one a game runs on";
@@ -509,6 +944,20 @@ export component Library inherits Window {
                     color: Theme.faint;
                 }
             }
+        }
+
+        // Frameless window: resize handles along the edges, on top of everything.
+        if !root.fullscreen: Rectangle {
+            property <length> edge: 6px;
+            property <length> corner: 12px;
+            ResizeHandle { x: corner; y: 0; width: parent.width - 2 * corner; height: edge; cursor: MouseCursor.ns-resize; dir: 0; resize(d, x, y) => { root.resize(d, x, y); } }
+            ResizeHandle { x: corner; y: parent.height - edge; width: parent.width - 2 * corner; height: edge; cursor: MouseCursor.ns-resize; dir: 1; resize(d, x, y) => { root.resize(d, x, y); } }
+            ResizeHandle { x: 0; y: corner; width: edge; height: parent.height - 2 * corner; cursor: MouseCursor.ew-resize; dir: 2; resize(d, x, y) => { root.resize(d, x, y); } }
+            ResizeHandle { x: parent.width - edge; y: corner; width: edge; height: parent.height - 2 * corner; cursor: MouseCursor.ew-resize; dir: 3; resize(d, x, y) => { root.resize(d, x, y); } }
+            ResizeHandle { x: 0; y: 0; width: corner; height: corner; cursor: MouseCursor.nwse-resize; dir: 4; resize(d, x, y) => { root.resize(d, x, y); } }
+            ResizeHandle { x: parent.width - corner; y: 0; width: corner; height: corner; cursor: MouseCursor.nesw-resize; dir: 5; resize(d, x, y) => { root.resize(d, x, y); } }
+            ResizeHandle { x: 0; y: parent.height - corner; width: corner; height: corner; cursor: MouseCursor.nesw-resize; dir: 6; resize(d, x, y) => { root.resize(d, x, y); } }
+            ResizeHandle { x: parent.width - corner; y: parent.height - corner; width: corner; height: corner; cursor: MouseCursor.nwse-resize; dir: 7; resize(d, x, y) => { root.resize(d, x, y); } }
         }
     }
     init => { fs.focus(); }

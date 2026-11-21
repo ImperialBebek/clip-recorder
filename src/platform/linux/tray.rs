@@ -1,12 +1,12 @@
 //! StatusNotifierItem tray icon (KDE, GNOME with the AppIndicator extension,
-//! waybar, ...). Left click opens the library; the menu has Save clip, Open
-//! library and Quit.
+//! waybar, ...). Double-click opens or focuses the library; the menu has
+//! Save clip, Open library and Quit.
 
 use ksni::menu::StandardItem;
 use ksni::{MenuItem, TrayMethods};
 use tokio::sync::mpsc;
 
-use super::ipc::Request;
+use super::ipc::{self, Request};
 
 pub struct Tray {
     pub tx: mpsc::UnboundedSender<Request>,
@@ -22,6 +22,8 @@ pub struct Tray {
     pub waiting: bool,
     /// The screen can be chosen (portal capture, not the game's window).
     pub pick: bool,
+    /// SNI has no double-click event; pair the clicks ourselves.
+    pub last_click: Option<std::time::Instant>,
 }
 
 fn send(t: &Tray, cmd: &str) {
@@ -32,12 +34,43 @@ fn send(t: &Tray, cmd: &str) {
 }
 
 /// Starts another instance of this binary for a window (`library`),
-/// so the recorder itself never links a GUI into its address space.
-pub fn open_window(which: &str) {
+/// so the recorder itself never links a GUI into its address space. The
+/// child gets `XDG_ACTIVATION_TOKEN` when KDE just gave us one.
+pub fn open_window(which: &str, activation_token: Option<&str>) {
     if let Ok(exe) = std::env::current_exe() {
-        if let Ok(mut child) = std::process::Command::new(exe).arg(which).spawn() {
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg(which);
+        if let Some(token) = activation_token {
+            cmd.env("XDG_ACTIVATION_TOKEN", token);
+        }
+        if let Ok(mut child) = cmd.spawn() {
             std::thread::spawn(move || child.wait());
         }
+    }
+}
+
+/// Two `activate` calls this close together are one double-click.
+fn is_double(prev: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    prev.is_some_and(|t| now.duration_since(t) < std::time::Duration::from_millis(400))
+}
+
+/// KDE hands us an activation token per click; it can land a hair after the
+/// `activate` call itself, so give it a few retries.
+fn activation_token() -> Option<String> {
+    for _ in 0..10 {
+        if let Some(t) = ksni::current_xdg_activation_token() {
+            return Some(t);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    None
+}
+
+/// Focus the open library if there is one, else open it.
+fn open_or_focus(token: Option<String>) {
+    let line = token.as_deref().map_or("focus".to_owned(), |t| format!("focus {t}"));
+    if !ipc::tell_library(&line) {
+        open_window("library", token.as_deref());
     }
 }
 
@@ -73,7 +106,13 @@ impl ksni::Tray for Tray {
         }
     }
     fn activate(&mut self, _x: i32, _y: i32) {
-        open_window("library");
+        let now = std::time::Instant::now();
+        self.last_click = if is_double(self.last_click, now) {
+            open_or_focus(activation_token());
+            None
+        } else {
+            Some(now)
+        };
     }
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let screen = |label: &str| -> MenuItem<Self> {
@@ -102,7 +141,7 @@ impl ksni::Tray for Tray {
             StandardItem {
                 label: "Open library".into(),
                 icon_name: "folder-videos".into(),
-                activate: Box::new(|_: &mut Self| open_window("library")),
+                activate: Box::new(|_: &mut Self| open_or_focus(activation_token())),
                 ..Default::default()
             }
             .into(),
@@ -151,5 +190,18 @@ pub async fn spawn(tray: Tray) -> Option<ksni::Handle<Tray>> {
             eprintln!("tray: {e} (no StatusNotifier host; use `clip-recorder menu` instead)");
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn double_click_timing() {
+        let t0 = std::time::Instant::now();
+        assert!(is_double(Some(t0), t0 + std::time::Duration::from_millis(150)));
+        assert!(!is_double(Some(t0), t0 + std::time::Duration::from_millis(450)));
+        assert!(!is_double(None, t0));
     }
 }

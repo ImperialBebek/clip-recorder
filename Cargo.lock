@@ -629,6 +629,7 @@ dependencies = [
  "slint-build",
  "smithay-client-toolkit 0.19.2",
  "tokio",
+ "wayland-backend",
  "wayland-client",
  "wayland-protocols-plasma",
 ]
