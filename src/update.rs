@@ -11,11 +11,24 @@ use anyhow::{bail, Context, Result};
 use crate::platform::ipc;
 
 const REPO: &str = "ImperialBebek/clip-recorder";
-pub const ASSET: &str = concat!(
-    "clip-recorder-",
-    env!("CLIP_RECORDER_ARCH"),
-    "-linux.tar.gz"
-);
+
+/// The release asset this copy wants: the AppImage when running as one, the
+/// install tarball otherwise.
+fn asset_name(appimage: bool) -> String {
+    let arch = env!("CLIP_RECORDER_ARCH");
+    if appimage {
+        format!("clip-recorder-{arch}.AppImage")
+    } else {
+        format!("clip-recorder-{arch}-linux.tar.gz")
+    }
+}
+
+/// `$APPIMAGE`, when this process runs as an AppImage: its path on the real
+/// filesystem (`current_exe` points inside the read-only mount then).
+fn appimage() -> Option<PathBuf> {
+    let p = PathBuf::from(std::env::var_os("APPIMAGE")?);
+    p.is_file().then_some(p)
+}
 
 pub struct Release {
     pub version: String,
@@ -114,6 +127,18 @@ pub fn check() -> Result<Option<Release>> {
         return Ok(None);
     }
     let assets = json["assets"].as_array().cloned().unwrap_or_default();
+    let asset = asset_name(appimage().is_some());
+    let (asset_url, sum_url) =
+        pick_urls(&assets, &asset).with_context(|| format!("release v{version} has no {asset}"))?;
+    Ok(Some(Release {
+        version,
+        sum_url,
+        asset_url,
+    }))
+}
+
+/// The asset and checksum download URLs for `asset` in a release's asset list.
+fn pick_urls(assets: &[serde_json::Value], asset: &str) -> Option<(String, Option<String>)> {
     let url_of = |name: &str| {
         assets
             .iter()
@@ -121,42 +146,30 @@ pub fn check() -> Result<Option<Release>> {
             .and_then(|a| a["url"].as_str())
             .map(str::to_owned)
     };
-    let asset_url = url_of(ASSET).with_context(|| format!("release v{version} has no {ASSET}"))?;
-    Ok(Some(Release {
-        version,
-        sum_url: url_of(&format!("{ASSET}.sha256")),
-        asset_url,
-    }))
+    Some((url_of(asset)?, url_of(&format!("{asset}.sha256"))))
 }
 
 /// Downloads the release and swaps it in for the installed binary. Call
-/// `restart` afterwards to move a running recorder onto it.
+/// `restart` afterwards to move a running recorder onto it. As an AppImage it
+/// replaces `$APPIMAGE` itself and returns its path.
 pub fn apply(rel: &Release) -> Result<PathBuf> {
+    if let Some(path) = appimage() {
+        return apply_appimage(rel, &path);
+    }
     let exe = std::env::current_exe()?.canonicalize()?;
     let dir = exe.parent().context("binary has no directory")?;
     let work = dir.join(".clip-recorder-update");
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&work).with_context(|| {
         format!(
-            "{} is not writable; update with your package manager, or reinstall with install.sh",
+            "{} is not writable; update with your package manager, or reinstall it",
             dir.display()
         )
     })?;
     let result = (|| {
-        let tarball = work.join(ASSET);
+        let tarball = work.join(asset_name(false));
         curl(&rel.asset_url, "application/octet-stream", Some(&tarball))?;
-        if let Some(url) = &rel.sum_url {
-            let want = String::from_utf8_lossy(&curl(url, "application/octet-stream", None)?)
-                .split_whitespace()
-                .next()
-                .unwrap_or_default()
-                .to_owned();
-            let got = Command::new("sha256sum").arg(&tarball).output()?;
-            let got = String::from_utf8_lossy(&got.stdout);
-            if got.split_whitespace().next() != Some(want.as_str()) {
-                bail!("checksum mismatch, not installing");
-            }
-        }
+        verify_sum(rel, &tarball)?;
         let ok = Command::new("tar")
             .arg("-xzf")
             .arg(&tarball)
@@ -177,6 +190,59 @@ pub fn apply(rel: &Release) -> Result<PathBuf> {
     let _ = std::fs::remove_dir_all(&work);
     result?;
     Ok(exe)
+}
+
+/// The AppImage variant of `apply`: the new file is downloaded next to the
+/// running image and renamed over it, so the running process keeps the old
+/// inode until `restart` relaunches the path.
+fn apply_appimage(rel: &Release, appimage: &Path) -> Result<PathBuf> {
+    let dir = appimage.parent().context("binary has no directory")?;
+    let tmp = dir.join(format!(
+        ".{}.part",
+        appimage
+            .file_name()
+            .context("bad $APPIMAGE")?
+            .to_string_lossy()
+    ));
+    let result = (|| -> Result<()> {
+        let f = std::fs::File::create(&tmp).with_context(|| {
+            format!(
+                "{} is not writable; move or replace {} yourself",
+                dir.display(),
+                appimage.display()
+            )
+        })?;
+        drop(f);
+        curl(&rel.asset_url, "application/octet-stream", Some(&tmp))?;
+        verify_sum(rel, &tmp)?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+        std::fs::rename(&tmp, appimage)
+            .with_context(|| format!("cannot replace {}", appimage.display()))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result?;
+    Ok(appimage.to_path_buf())
+}
+
+/// Checks `file` against the release's `.sha256` asset when there is one.
+fn verify_sum(rel: &Release, file: &Path) -> Result<()> {
+    if let Some(url) = &rel.sum_url {
+        let want = String::from_utf8_lossy(&curl(url, "application/octet-stream", None)?)
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_owned();
+        let got = Command::new("sha256sum").arg(file).output()?;
+        let got = String::from_utf8_lossy(&got.stdout);
+        if got.split_whitespace().next() != Some(want.as_str()) {
+            bail!("checksum mismatch, not installing");
+        }
+    }
+    Ok(())
 }
 
 /// Restarts a running recorder with the arguments it was started with. A
@@ -238,5 +304,36 @@ mod tests {
         assert!(!is_newer("v0.1.0", "0.1.0"));
         assert!(!is_newer("0.1.0", "0.2.0"));
         assert!(!is_newer("garbage", "0.1.0"));
+    }
+
+    #[test]
+    fn names_assets() {
+        let arch = env!("CLIP_RECORDER_ARCH");
+        assert_eq!(
+            asset_name(false),
+            format!("clip-recorder-{arch}-linux.tar.gz")
+        );
+        assert_eq!(asset_name(true), format!("clip-recorder-{arch}.AppImage"));
+    }
+
+    #[test]
+    fn picks_asset_urls() {
+        let arch = env!("CLIP_RECORDER_ARCH");
+        let assets = serde_json::json!([
+            {"name": format!("clip-recorder-{arch}-linux.tar.gz"), "url": "u/tar"},
+            {"name": format!("clip-recorder-{arch}-linux.tar.gz.sha256"), "url": "u/tar.sum"},
+            {"name": format!("clip-recorder-{arch}.AppImage"), "url": "u/app"},
+            {"name": format!("clip-recorder-{arch}.AppImage.sha256"), "url": "u/app.sum"},
+        ]);
+        let assets = assets.as_array().unwrap();
+        assert_eq!(
+            pick_urls(assets, &asset_name(false)),
+            Some(("u/tar".to_owned(), Some("u/tar.sum".to_owned())))
+        );
+        assert_eq!(
+            pick_urls(assets, &asset_name(true)),
+            Some(("u/app".to_owned(), Some("u/app.sum".to_owned())))
+        );
+        assert_eq!(pick_urls(assets, "clip-recorder-missing"), None);
     }
 }

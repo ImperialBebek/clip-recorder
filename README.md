@@ -22,11 +22,20 @@ clip-recorder
 
 The binary links the system GStreamer, so the runtime plugins below are still needed (not the `-dev` packages); `install.sh` warns when one is missing. `./install.sh uninstall` removes it again and keeps your clips and settings.
 
+Or run the **AppImage** instead — same binary, single file:
+
+```sh
+chmod +x clip-recorder-x86_64.AppImage
+./clip-recorder-x86_64.AppImage
+```
+
+It still needs the same system GStreamer plugins as the tarball. It updates itself in place (`clip-recorder update` replaces the file), but does not add an app-menu or autostart entry — use `install.sh` above if you want it to start with your session.
+
 ### Updates
 
 The recorder checks for a new release once a day. When there is one, the tray menu shows **Update to vX.Y.Z**; or run `clip-recorder update` (`--check` only reports). It downloads the release, verifies its checksum, replaces the binary and restarts the recorder. While the repository is private, the check needs a GitHub token: `GITHUB_TOKEN`, `GH_TOKEN`, or a logged-in `gh`. Turn it off with `check_updates = false`.
 
-To publish a release, bump `version` in `Cargo.toml`, merge, and push a matching tag (`git tag v0.2.0 && git push origin v0.2.0`); the Release workflow builds and uploads the archive.
+To publish a release, bump `version` in `Cargo.toml`, merge, and push a matching tag (`git tag v0.2.0 && git push origin v0.2.0`); the Release workflow builds and uploads the tarball and AppImage.
 
 ### Dependencies
 
