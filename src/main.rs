@@ -3,6 +3,7 @@ mod clips;
 mod config;
 mod daemon;
 mod encoder;
+mod games;
 mod gst_util;
 mod platform;
 mod player;
@@ -10,6 +11,7 @@ mod ring;
 mod save;
 mod sysinfo;
 mod toast;
+mod trim;
 mod ui;
 mod update;
 

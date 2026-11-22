@@ -1,5 +1,5 @@
 import { Theme } from "theme.slint";
-import { Keys, LivePill, Icon, RecordMark } from "widgets.slint";
+import { Keys, LivePill, Icon, RecordMark, IconBadge } from "widgets.slint";
 
 export struct ClipCard {
     title: string,
@@ -8,6 +8,19 @@ export struct ClipCard {
     path: string,
     thumb: image,
     selected: bool,
+    game: string,
+    exported: bool,
+    icon: image,
+    initial: string,
+    size: string,
+}
+
+export struct GameChip {
+    key: string,
+    name: string,
+    icon: image,
+    initial: string,
+    count: int,
 }
 
 export struct PlayerTrack {
@@ -24,34 +37,75 @@ export struct ToggleRow {
     on: bool,
 }
 
+// One option inside Segmented; the caller drives its width.
+component SegOption inherits Rectangle {
+    in property <string> text;
+    in property <bool> mono;
+    in property <bool> sel;
+    // The label's natural width, so the hug variant can size itself.
+    out property <length> text-w: label.preferred-width;
+    callback picked;
+    border-radius: 6px;
+    background: sel ? Theme.key-bg : ta.has-hover ? Theme.card : transparent;
+    border-width: sel ? 1px : 0;
+    border-color: Theme.key-border;
+    animate background { duration: 140ms; easing: ease-out; }
+    label := Text {
+        text: text;
+        font-family: mono ? Theme.mono-font : Theme.body-font;
+        font-size: 12px;
+        font-weight: sel ? 600 : 400;
+        color: sel ? Theme.text : Theme.muted;
+    }
+    ta := TouchArea { mouse-cursor: pointer; clicked => { root.picked(); } }
+}
+
 component Segmented inherits Rectangle {
     in property <[string]> options;
     in property <int> selected;
     in property <bool> mono;
+    // Equal-width options spanning the container; off hugs the labels.
+    in property <bool> fill;
     callback picked(int);
     height: 32px;
+    // Hug: exactly as wide as the options. Fill: take the container's width.
+    horizontal-stretch: fill ? 1 : 0;
+    preferred-width: fill ? 0px : hug.preferred-width;
+    max-width: fill ? 100000px : hug.preferred-width;
     border-radius: 8px;
     background: Theme.sidebar;
     border-width: 1px;
     border-color: Theme.divider;
-    HorizontalLayout {
+    // Always instantiated (hidden when filling) so the root can read its width.
+    hug := HorizontalLayout {
+        visible: !fill;
         padding: 3px;
         spacing: 2px;
         alignment: start;
-        for o[i] in options: Rectangle {
-            width: label.preferred-width + 30px;
-            border-radius: 6px;
-            background: i == selected ? Theme.key-bg : ta.has-hover ? Theme.card : transparent;
-            border-width: i == selected ? 1px : 0;
-            border-color: Theme.key-border;
-            label := Text {
-                text: o;
-                font-family: mono ? Theme.mono-font : Theme.body-font;
-                font-size: 12px;
-                font-weight: i == selected ? 600 : 400;
-                color: i == selected ? Theme.text : Theme.muted;
-            }
-            ta := TouchArea { mouse-cursor: pointer; clicked => { root.picked(i); } }
+        for o[i] in options: SegOption {
+            text: o;
+            mono: root.mono;
+            sel: i == root.selected;
+            width: self.text-w + 30px;
+            picked => { root.picked(i); }
+        }
+    }
+    // Explicit x/y/width keeps the parent from sizing itself off this row,
+    // which is what lets the options read `row.width` without a loop.
+    if fill: row := HorizontalLayout {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: 100%;
+        padding: 3px;
+        spacing: 2px;
+        alignment: start;
+        for o[i] in options: SegOption {
+            text: o;
+            mono: root.mono;
+            sel: i == root.selected;
+            width: (row.width - 6px - (options.length - 1) * 2px) / options.length;
+            picked => { root.picked(i); }
         }
     }
 }
@@ -103,57 +157,37 @@ component Choices inherits VerticalLayout {
     }
 }
 
-component Toggles inherits VerticalLayout {
-    in property <[ToggleRow]> rows;
-    callback toggled(int);
-    spacing: 2px;
-    Rectangle {
-        background: Theme.sidebar;
-        border-radius: 8px;
-        border-width: 1px;
-        border-color: Theme.divider;
-        VerticalLayout {
-            padding: 3px;
-            spacing: 2px;
-            for r[i] in rows: Rectangle {
-                height: 28px;
-                border-radius: 6px;
-                background: r.on ? Theme.key-bg : ta.has-hover ? Theme.card : transparent;
-                border-width: r.on ? 1px : 0;
-                border-color: Theme.key-border;
-                HorizontalLayout {
-                    padding-left: 10px;
-                    padding-right: 10px;
-                    spacing: 8px;
-                    Text {
-                        text: r.label;
-                        font-family: Theme.body-font;
-                        font-size: 12px;
-                        font-weight: r.on ? 600 : 400;
-                        color: r.on ? Theme.text : Theme.muted;
-                        vertical-alignment: center;
-                    }
-                    Text {
-                        text: r.detail;
-                        font-family: Theme.body-font;
-                        font-size: 11px;
-                        color: Theme.muted;
-                        overflow: elide;
-                        horizontal-stretch: 1;
-                        vertical-alignment: center;
-                    }
-                    if r.on: Icon {
-                        name: "check";
-                        width: 12px;
-                        height: 12px;
-                        stroke: Theme.text;
-                        y: (parent.height - self.height) / 2;
-                    }
-                }
-                ta := TouchArea { mouse-cursor: pointer; clicked => { root.toggled(i); } }
+// One app-audio source in the settings popover: icon over label, red when on.
+component SourceTile inherits Rectangle {
+    in property <ToggleRow> item;
+    in property <string> icon-name;
+    callback clicked;
+    height: 60px;
+    border-radius: 8px;
+    background: item.on ? #ff3b2f24 : Theme.bg;
+    border-width: 1px;
+    border-color: item.on ? Theme.red : Theme.border;
+    animate background, border-color { duration: 140ms; easing: ease-out; }
+    VerticalLayout {
+        alignment: center;
+        spacing: 6px;
+        HorizontalLayout {
+            alignment: center;
+            Icon { name: icon-name; width: 18px; height: 18px; stroke: item.on ? Theme.red : Theme.muted; }
+        }
+        HorizontalLayout {
+            alignment: center;
+            Text {
+                text: item.label;
+                font-family: Theme.body-font;
+                font-size: 12px;
+                font-weight: item.on ? 600 : 400;
+                color: item.on ? Theme.red : ta.has-hover ? Theme.text : Theme.muted;
+                overflow: elide;
             }
         }
     }
+    ta := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
 }
 
 component ResizeHandle inherits TouchArea {
@@ -258,23 +292,176 @@ component Step inherits HorizontalLayout {
     }
 }
 
+// One row of the game sidebar: icon, name, count; red rail when active.
+component SideItem inherits Rectangle {
+    in property <string> label;
+    in property <string> icon-name;
+    in property <image> icon;
+    in property <string> initial;
+    in property <int> count: -1;
+    in property <bool> active;
+    callback clicked;
+    height: 32px;
+    border-radius: 6px;
+    // Clipped so the rail follows the rounded corners, like Doop's inset shadow.
+    clip: true;
+    background: active || ta.has-hover ? Theme.card-hover : transparent;
+    animate background { duration: 120ms; easing: ease-out; }
+    Rectangle {
+        x: active ? 0px : -2px;
+        y: 0;
+        width: 2px;
+        height: 100%;
+        background: Theme.red;
+        opacity: active ? 1 : 0;
+        animate x, opacity { duration: 180ms; easing: cubic-bezier(0.23, 1, 0.32, 1); }
+    }
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 10px;
+        spacing: 10px;
+        Rectangle {
+            width: 18px;
+            height: 18px;
+            y: (parent.height - self.height) / 2;
+            if icon-name != "": Icon {
+                name: icon-name;
+                x: 1px;
+                y: 1px;
+                width: 16px;
+                height: 16px;
+                stroke: active ? Theme.text : Theme.muted;
+            }
+            if icon-name == "" && icon.width > 0: Rectangle {
+                x: 1px;
+                y: 1px;
+                width: 16px;
+                height: 16px;
+                border-radius: 4px;
+                clip: true;
+                Image { width: 100%; height: 100%; source: icon; image-fit: cover; }
+            }
+            if icon-name == "" && icon.width == 0 && initial != "": IconBadge {
+                initial: initial;
+                x: 1px;
+                y: 1px;
+            }
+        }
+        Text {
+            text: label;
+            font-family: Theme.body-font;
+            font-size: 13px;
+            font-weight: active ? 600 : 400;
+            color: active || ta.has-hover ? Theme.text : Theme.muted;
+            overflow: elide;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        if count >= 0: Text {
+            text: count;
+            font-family: Theme.mono-font;
+            font-size: 11px;
+            color: active ? Theme.muted : Theme.faint;
+            vertical-alignment: center;
+        }
+    }
+    ta := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+// The 6 s undo notice after clips go to the Trash; the bar drains with it.
+component UndoToast inherits Rectangle {
+    in property <string> message;
+    in property <float> frac;
+    in property <bool> can-undo: true;
+    callback undo();
+    width: row.preferred-width;
+    height: 44px;
+    border-radius: 12px;
+    background: Theme.card;
+    border-width: 1px;
+    border-color: Theme.border;
+    drop-shadow-blur: 32px;
+    drop-shadow-color: #00000073;
+    clip: true;
+    row := HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 8px;
+        spacing: 10px;
+        alignment: center;
+        Icon { name: "trash"; width: 16px; height: 16px; y: (parent.height - self.height) / 2; stroke: Theme.muted; }
+        Text {
+            text: message;
+            font-family: Theme.body-font;
+            font-size: 13px;
+            font-weight: 600;
+            color: Theme.text;
+            overflow: elide;
+            max-width: 480px;
+            vertical-alignment: center;
+        }
+        if can-undo: Rectangle {
+            height: 28px;
+            y: (parent.height - self.height) / 2;
+            width: u.preferred-width + 20px;
+            border-radius: 6px;
+            background: ua.has-hover ? #ff3b2f24 : transparent;
+            animate background { duration: 120ms; easing: ease-out; }
+            u := Text { vertical-alignment: center; horizontal-alignment: center; text: "Undo"; font-family: Theme.body-font; font-size: 13px; font-weight: 600; color: Theme.red; }
+            ua := TouchArea { mouse-cursor: pointer; clicked => { root.undo(); } }
+        }
+        if can-undo: Text {
+            text: "Ctrl Z";
+            font-family: Theme.mono-font;
+            font-size: 10px;
+            color: Theme.faint;
+            vertical-alignment: center;
+        }
+        if can-undo: Rectangle { width: 6px; }
+    }
+    Rectangle {
+        x: 0;
+        y: parent.height - 2px;
+        width: parent.width * root.frac;
+        height: 2px;
+        background: Theme.faint;
+    }
+}
+
 component TextButton inherits Rectangle {
     in property <string> label;
     in property <bool> danger;
+    // Borderless, muted until hovered.
+    in property <bool> ghost;
+    in property <string> icon;
     in property <bool> enabled: true;
     callback clicked;
-    width: t.preferred-width + 28px;
+    width: row.preferred-width + 28px;
     border-radius: 6px;
     opacity: enabled ? 1 : 0.4;
-    background: danger ? (ta.has-hover && enabled ? #ff5247 : Theme.red) : (ta.has-hover && enabled ? Theme.card-hover : Theme.key-bg);
-    border-width: danger ? 0 : 1px;
+    background: danger ? (ta.has-hover && enabled ? #ff5247 : Theme.red)
+        : ghost ? (ta.has-hover && enabled ? Theme.card-hover : transparent)
+        : (ta.has-hover && enabled ? Theme.card-hover : Theme.key-bg);
+    animate background { duration: 120ms; easing: ease-out; }
+    border-width: danger || ghost ? 0 : 1px;
     border-color: Theme.key-border;
-    t := Text {
-        text: label;
-        font-family: Theme.body-font;
-        font-size: 12px;
-        font-weight: 600;
-        color: danger ? white : Theme.text;
+    row := HorizontalLayout {
+        alignment: center;
+        spacing: icon != "" ? 6px : 0px;
+        if icon != "": Icon {
+            name: icon;
+            width: 14px;
+            height: 14px;
+            y: (parent.height - self.height) / 2;
+            stroke: danger ? white : ghost ? Theme.muted : Theme.text;
+        }
+        t := Text {
+            vertical-alignment: center;
+            text: label;
+            font-family: Theme.body-font;
+            font-size: 12px;
+            font-weight: 600;
+            color: danger ? white : ghost ? (ta.has-hover && enabled ? Theme.text : Theme.muted) : Theme.text;
+        }
     }
     ta := TouchArea { mouse-cursor: enabled ? pointer : default; clicked => { if root.enabled { root.clicked(); } } }
 }
@@ -288,6 +475,7 @@ component IconButton inherits Rectangle {
     height: self.width;
     border-radius: round ? self.width / 2 : 8px;
     background: active || ta.has-hover ? Theme.card-hover : round ? Theme.key-bg : transparent;
+    animate background { duration: 120ms; easing: ease-out; }
     Icon { name: icon; stroke: Theme.text; width: round ? 14px : 16px; height: self.width; }
     ta := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
 }
@@ -306,7 +494,7 @@ component Card inherits Rectangle {
         clip: true;
         background: Theme.card;
         Image { width: 100%; height: 100%; source: item.thumb; image-fit: cover; }
-        if hovered: Rectangle { background: #ffffff10; }
+        Rectangle { background: #ffffff10; opacity: hovered ? 1 : 0; animate opacity { duration: 120ms; easing: ease-out; } }
         Rectangle {
             background: #ff3b2f22;
             border-width: 2px;
@@ -356,6 +544,15 @@ component Card inherits Rectangle {
             background: #0e0f11d0;
             len := Text { text: item.length; font-family: Theme.mono-font; font-size: 11px; font-weight: 500; color: Theme.text; }
         }
+        if item.exported: Rectangle { // a trim export of another clip
+            x: parent.width - self.width - 8px;
+            y: 8px;
+            width: trim.preferred-width + 12px;
+            height: 20px;
+            border-radius: 4px;
+            background: #0e0f11d0;
+            trim := Text { text: "Exported"; font-family: Theme.mono-font; font-size: 11px; font-weight: 500; color: Theme.text; }
+        }
     }
     HorizontalLayout {
         y: thumb-height + 10px;
@@ -363,6 +560,18 @@ component Card inherits Rectangle {
         padding-left: 2px;
         padding-right: 2px;
         spacing: 8px;
+        if item.icon.width > 0: Rectangle {
+            width: 16px;
+            height: 16px;
+            border-radius: 4px;
+            clip: true;
+            y: (parent.height - self.height) / 2;
+            Image { width: 100%; height: 100%; source: item.icon; image-fit: cover; }
+        }
+        if item.icon.width == 0 && item.initial != "": IconBadge {
+            initial: item.initial;
+            y: (parent.height - self.height) / 2;
+        }
         Text { text: item.title; overflow: elide; font-family: Theme.body-font; font-size: 13px; font-weight: 600; color: Theme.text; vertical-alignment: center; horizontal-stretch: 1; }
         Text { text: item.when; font-family: Theme.mono-font; font-size: 11px; color: Theme.muted; vertical-alignment: center; }
     }
@@ -370,9 +579,25 @@ component Card inherits Rectangle {
 
 export component Library inherits Window {
     in property <[ClipCard]> clips;
+    // Every clip card before filtering; `clips` is the filtered view of it.
+    in property <int> total-count;
+    in property <[GameChip]> games;
+    in-out property <string> game-filter;
+    in-out property <bool> exported-only;
+    callback set-game-filter(string);
+    callback toggle-exported();
     in property <bool> live;
     in property <string> state-label: "Stopped";
+    // The live game's icon/initial in the status pill, when it is known.
+    in property <image> pill-icon;
+    in property <string> pill-initial;
+    // Main column heading: "All clips" or the filtered game's name, and
+    // "13 clips" / "1 clip" / "0 of 1 clips" next to it.
+    in property <string> header-title;
+    in property <string> header-count;
     in property <string> folder-text;
+    // "13 clips · 1284 MB" under the folder in the sidebar footer.
+    in property <string> usage-text;
     in property <[string]> hotkey: ["Alt", "S"];
     in property <int> seconds: 60;
     in property <int> quality: 1;
@@ -389,14 +614,30 @@ export component Library inherits Window {
     in-out property <bool> select-mode;
     // Ctrl or Shift is down: show the selection circles as a hint.
     in-out property <bool> mod-held;
-    in-out property <bool> confirming;
     in property <int> selected-count;
     callback grid-click(length, length, length, length, length, int, bool, bool);
     callback band-start(bool);
     callback band-select(length, length, length, length, length, length, length, int);
     callback toggle-select-mode();
     callback select-all(bool);
-    callback delete-selected();
+    // Trash: selected cards, or the clip open in the player.
+    // Permanent delete: opens the dialog for the same two sets.
+    callback ask-delete-selected();
+    callback ask-delete-current();
+    // The in-window Undo toast; `toast-undo` hides Undo on failure toasts.
+    in-out property <bool> toast-visible;
+    in property <string> toast-message;
+    in property <bool> toast-undo;
+    in property <float> toast-frac;
+    callback undo-trash();
+    // The modal permanent-delete dialog, staging `dialog-rows`.
+    in-out property <bool> dialog-open;
+    in property <string> dialog-title;
+    in property <string> dialog-meta;
+    in property <string> dialog-body;
+    in property <[ClipCard]> dialog-rows;
+    callback dialog-keep();
+    callback dialog-confirm();
     callback set-quality(int);
     callback set-duration(int);
     callback start-recorder();
@@ -408,6 +649,8 @@ export component Library inherits Window {
     in-out property <bool> player-open;
     in-out property <bool> fullscreen;
     in property <string> player-title;
+    in property <image> player-icon;
+    in property <string> player-initial;
     in property <string> player-time;
     in property <[PlayerTrack]> tracks;
     in property <[image]> filmstrip;
@@ -417,10 +660,20 @@ export component Library inherits Window {
     in-out property <bool> scrubbing;
     in-out property <float> scrub-pos;
     property <float> shown-frac: dur > 0 ? clamp((scrubbing ? scrub-pos : pos) / dur, 0, 1) : 0;
+    // The trim range in seconds; trim-out == 0 means it isn't known yet.
+    in-out property <float> trim-in;
+    in-out property <float> trim-out;
+    in property <string> trim-label;
+    in property <bool> exporting;
+    in-out property <string> export-status;
+    property <float> trim-in-frac: dur > 0 ? clamp(trim-in / dur, 0, 1) : 0;
+    property <float> trim-out-frac: dur > 0 && trim-out > trim-in ? clamp(trim-out / dur, 0, 1) : 1;
+    callback set-trim-in(float);
+    callback set-trim-out(float);
+    callback export-trim();
     in property <bool> playing;
     in property <float> volume: 1;
     in property <bool> muted;
-    in-out property <bool> player-confirming;
     callback player-back();
     callback toggle-play();
     callback seek(float);
@@ -432,7 +685,6 @@ export component Library inherits Window {
     callback set-track-volume(int, float);
     callback open-external();
     callback show-folder();
-    callback delete-current();
     callback toggle-fullscreen();
     // False when the recorder follows the game window and there is no screen to pick.
     in property <bool> screen-picker: true;
@@ -442,12 +694,20 @@ export component Library inherits Window {
     callback resize(int, length, length);
     callback close-window();
 
+    // Overlay presence: 0 hidden, 1 shown. Opening is a touch slower than
+    // closing so dismissal gets out of the way.
+    property <float> dlg-t: dialog-open ? 1 : 0;
+    animate dlg-t { duration: dialog-open ? 200ms : 140ms; easing: cubic-bezier(0.23, 1, 0.32, 1); }
+    property <float> toast-t: toast-visible ? 1 : 0;
+    animate toast-t { duration: toast-visible ? 220ms : 150ms; easing: cubic-bezier(0.23, 1, 0.32, 1); }
+    property <float> pop-t: popover ? 1 : 0;
+    animate pop-t { duration: popover ? 180ms : 120ms; easing: cubic-bezier(0.23, 1, 0.32, 1); }
     changed popover => { if popover { root.load-mics(); } }
 
     title: "Clips";
     preferred-width: 960px;
     preferred-height: 640px;
-    min-width: 420px;
+    min-width: 680px;
     min-height: 360px;
     no-frame: true;
     background: Theme.bg;
@@ -460,15 +720,21 @@ export component Library inherits Window {
         }
         key-pressed(e) => {
             root.mod-held = e.modifiers.control || e.modifiers.shift;
+            // The modal dialog swallows everything else while it is up:
+            // Esc keeps, Enter/Delete confirms, auto-repeat can't.
+            if root.dialog-open {
+                if e.text == Key.Escape { root.dialog-keep(); }
+                else if !e.repeat && (e.text == Key.Return || e.text == Key.Delete) { root.dialog-confirm(); }
+                return accept;
+            }
+            if root.toast-visible && e.modifiers.control && !e.modifiers.shift && (e.text == "z" || e.text == "Z") && !e.repeat {
+                root.undo-trash();
+                return accept;
+            }
             if root.player-open {
                 if e.text == Key.Escape {
                     if root.fullscreen { root.toggle-fullscreen(); }
-                    else if root.player-confirming { root.player-confirming = false; }
                     else { root.player-back(); }
-                    return accept;
-                }
-                if root.player-confirming {
-                    if e.text == Key.Return && !e.repeat { root.delete-current(); }
                     return accept;
                 }
                 if e.text == " " || e.text == "k" || e.text == "K" { root.toggle-play(); return accept; }
@@ -477,30 +743,31 @@ export component Library inherits Window {
                 if e.text == Key.UpArrow { root.set-volume(min(root.volume + 0.1, 1)); return accept; }
                 if e.text == Key.DownArrow { root.set-volume(max(root.volume - 0.1, 0)); return accept; }
                 if e.text == "m" || e.text == "M" { root.toggle-mute(); return accept; }
+                if e.text == "i" || e.text == "I" { root.set-trim-in(root.pos); return accept; }
+                if e.text == "o" || e.text == "O" { root.set-trim-out(root.pos); return accept; }
                 if e.text == "f" || e.text == "F" { root.toggle-fullscreen(); return accept; }
                 if e.text == Key.PageUp { root.prev-clip(); return accept; }
                 if e.text == Key.PageDown { root.next-clip(); return accept; }
-                if e.text == Key.Delete && !e.repeat { root.player-confirming = true; return accept; }
+                if e.text == Key.Delete && !e.repeat {
+                    root.ask-delete-current();
+                    return accept;
+                }
                 return accept;
             }
             if e.text == Key.Escape {
-                if confirming { confirming = false; } else if select-mode { root.toggle-select-mode(); } else if popover { popover = false; } else { root.close-window(); }
+                if select-mode { root.toggle-select-mode(); } else if popover { popover = false; } else { root.close-window(); }
                 return accept;
             }
             if clips.length > 0 && e.modifiers.control && (e.text == "a" || e.text == "A") && !popover {
                 root.select-all(false);
                 return accept;
             }
-            // Auto-repeat of a held key is swallowed: one deliberate press per step,
-            // so holding Delete can never walk from "ask" straight to "delete".
+            // Auto-repeat of a held key is swallowed: one deliberate press
+            // trashes, Shift lands on the permanent-delete dialog.
             if select-mode && !popover && (e.text == Key.Delete || e.text == Key.Backspace) {
-                if !e.repeat {
-                    if confirming { root.delete-selected(); } else if selected-count > 0 { confirming = true; }
+                if !e.repeat && selected-count > 0 {
+                    root.ask-delete-selected();
                 }
-                return accept;
-            }
-            if confirming && e.text == Key.Return {
-                if !e.repeat { root.delete-selected(); }
                 return accept;
             }
             reject
@@ -517,11 +784,26 @@ export component Library inherits Window {
                     spacing: 12px;
                     if root.player-open: IconButton { y: (parent.height - self.height) / 2; icon: "back"; clicked => { root.player-back(); } }
                     if !root.player-open: RecordMark { size: 16px; y: (parent.height - 16px) / 2; }
+                    if root.player-open && root.player-icon.width > 0: Rectangle {
+                        width: 18px;
+                        height: 18px;
+                        border-radius: 4px;
+                        clip: true;
+                        y: (parent.height - self.height) / 2;
+                        Image { width: 100%; height: 100%; source: root.player-icon; image-fit: cover; }
+                    }
+                    if root.player-open && root.player-icon.width == 0 && root.player-initial != "": IconBadge {
+                        initial: root.player-initial;
+                        size: 18px;
+                        y: (parent.height - self.height) / 2;
+                    }
                     Text { text: root.player-open ? root.player-title : "Clips"; font-family: Theme.body-font; font-size: 16px; font-weight: 600; color: Theme.text; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
                     LivePill {
                         y: (parent.height - self.height) / 2;
                         live: root.live;
                         label: root.state-label;
+                        icon: root.pill-icon;
+                        initial: root.pill-initial;
                         TouchArea { mouse-cursor: root.live ? default : pointer; clicked => { if !root.live { root.start-recorder(); } } }
                     }
                     if !root.player-open && clips.length > 0: IconButton { y: (parent.height - self.height) / 2; icon: "check"; active: root.select-mode; clicked => { root.toggle-select-mode(); } }
@@ -532,34 +814,135 @@ export component Library inherits Window {
             }
             if !root.fullscreen: Rectangle { height: 1px; background: Theme.divider; }
 
-            if !root.player-open && clips.length == 0: Rectangle {
+            if !root.player-open: HorizontalLayout {
                 vertical-stretch: 1;
-                VerticalLayout {
-                    alignment: center;
-                    spacing: 14px;
-                    HorizontalLayout { alignment: center; Keys { keys: root.hotkey; } }
-                    Text { text: "No clips yet"; horizontal-alignment: center; font-family: Theme.display-font; font-size: 30px; font-weight: 500; color: Theme.text; }
-                    Text {
-                        text: "Already recording in the background. Play something,\nthen press \{root.hotkey[0]}+\{root.hotkey[1]} to keep the last \{root.seconds} seconds.";
-                        horizontal-alignment: center;
-                        font-family: Theme.body-font;
-                        font-size: 13px;
-                        color: Theme.muted;
+                // The game sidebar; the empty library stays full-width.
+                if total-count > 0: Rectangle {
+                    width: 248px;
+                    background: Theme.bg;
+                    VerticalLayout {
+                        padding-top: 14px;
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        padding-bottom: 12px;
+                        spacing: 2px;
+                        SideItem {
+                            label: "All clips";
+                            icon-name: "grid";
+                            count: root.total-count;
+                            active: root.game-filter == "";
+                            clicked => { root.set-game-filter(""); }
+                        }
+                        VerticalLayout {
+                            padding-top: 16px;
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            padding-bottom: 6px;
+                            Text {
+                                text: "GAMES";
+                                font-family: Theme.body-font;
+                                font-size: 11px;
+                                font-weight: 600;
+                                letter-spacing: 0.6px;
+                                color: Theme.faint;
+                            }
+                        }
+                        Flickable {
+                            vertical-stretch: 1;
+                            content-height: game-list.preferred-height;
+                            // Without x/y Slint centres the layout in the viewport.
+                            game-list := VerticalLayout {
+                                x: 0;
+                                y: 0;
+                                width: parent.width;
+                                alignment: start;
+                                spacing: 2px;
+                                for g[i] in root.games: SideItem {
+                                    label: g.name;
+                                    icon: g.icon;
+                                    initial: g.initial;
+                                    count: g.count;
+                                    active: root.game-filter == g.key;
+                                    clicked => { root.set-game-filter(root.game-filter == g.key ? "" : g.key); }
+                                }
+                            }
+                        }
+                        VerticalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            Text { text: root.folder-text; height: 16px; font-family: Theme.mono-font; font-size: 10px; color: Theme.faint; }
+                            Text { text: root.usage-text; height: 16px; font-family: Theme.mono-font; font-size: 10px; color: Theme.faint; }
+                        }
+                    }
+                    Rectangle {
+                        x: parent.width - 1px;
+                        y: 0;
+                        width: 1px;
+                        height: 100%;
+                        background: Theme.divider;
                     }
                 }
-            }
-
-            if !root.player-open && clips.length > 0: VerticalLayout {
-                vertical-stretch: 1;
-                HorizontalLayout {
-                    padding-left: 24px;
-                    padding-right: 24px;
-                    padding-top: 20px;
-                    padding-bottom: 12px;
-                    Text { text: clips.length == 1 ? "1 clip" : "\{clips.length} clips"; font-family: Theme.body-font; font-size: 12px; font-weight: 600; color: Theme.text; horizontal-stretch: 1; }
-                    Text { text: root.folder-text; font-family: Theme.mono-font; font-size: 10px; color: Theme.faint; vertical-alignment: center; }
-                }
-                Flickable {
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    if total-count == 0: Rectangle {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 14px;
+                            HorizontalLayout { alignment: center; Keys { keys: root.hotkey; } }
+                            Text { text: "No clips yet"; horizontal-alignment: center; font-family: Theme.display-font; font-size: 30px; font-weight: 500; color: Theme.text; }
+                            Text {
+                                text: "Already recording in the background. Play something,\nthen press \{root.hotkey[0]}+\{root.hotkey[1]} to keep the last \{root.seconds} seconds.";
+                                horizontal-alignment: center;
+                                font-family: Theme.body-font;
+                                font-size: 13px;
+                                color: Theme.muted;
+                            }
+                        }
+                    }
+                    if total-count > 0: HorizontalLayout {
+                        padding-left: 24px;
+                        padding-right: 24px;
+                        padding-top: 12px;
+                        padding-bottom: 12px;
+                        spacing: 10px;
+                        Text { text: root.header-title; font-family: Theme.body-font; font-size: 15px; font-weight: 600; color: Theme.text; vertical-alignment: center; }
+                        Text { text: root.header-count; font-family: Theme.mono-font; font-size: 11px; color: Theme.muted; vertical-alignment: center; }
+                        Rectangle { horizontal-stretch: 1; }
+                        Segmented {
+                            y: (parent.height - self.height) / 2;
+                            options: ["All", "Exported"];
+                            selected: root.exported-only ? 1 : 0;
+                            picked(i) => { if (i == 1) != root.exported-only { root.toggle-exported(); } }
+                        }
+                    }
+                    if total-count > 0 && clips.length == 0: Rectangle {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 12px;
+                            Text {
+                                text: "No clips match this filter";
+                                horizontal-alignment: center;
+                                font-family: Theme.body-font;
+                                font-size: 14px;
+                                font-weight: 600;
+                                color: Theme.text;
+                            }
+                            HorizontalLayout {
+                                alignment: center;
+                                TextButton {
+                                    label: "Show all";
+                                    clicked => {
+                                        root.set-game-filter("");
+                                        if root.exported-only { root.toggle-exported(); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if clips.length > 0: Flickable {
+                    vertical-stretch: 1;
                     property <length> gap: 16px;
                     property <int> cols: max(1, floor((self.width - 48px + gap) / (260px + gap)));
                     property <length> card-width: (self.width - 48px - (cols - 1) * gap) / cols;
@@ -629,6 +1012,7 @@ export component Library inherits Window {
                         border-color: Theme.red;
                         border-radius: 4px;
                     }
+                    }
                 }
             }
 
@@ -646,6 +1030,15 @@ export component Library inherits Window {
                     TouchArea {
                         clicked => { root.toggle-play(); }
                         double-clicked => { root.toggle-fullscreen(); }
+                    }
+                    if root.toast-t > 0: UndoToast {
+                        x: (parent.width - self.width) / 2;
+                        y: parent.height - 16px - self.height + (1 - root.toast-t) * 8px;
+                        opacity: root.toast-t;
+                        message: root.toast-message;
+                        frac: root.toast-frac;
+                        can-undo: root.toast-undo;
+                        undo => { root.undo-trash(); }
                     }
                 }
                 if root.fullscreen: Rectangle {
@@ -689,21 +1082,21 @@ export component Library inherits Window {
                         IconButton { y: (parent.height - self.height) / 2; icon: root.playing ? "pause" : "play"; clicked => { root.toggle-play(); } }
                         IconButton { y: (parent.height - self.height) / 2; icon: "next"; clicked => { root.next-clip(); } }
                         Text { text: root.player-time; font-family: Theme.mono-font; font-size: 12px; color: Theme.muted; vertical-alignment: center; }
+                        if root.dur > 0: Text { text: root.trim-label; font-family: Theme.mono-font; font-size: 12px; color: Theme.muted; vertical-alignment: center; }
+                        TextButton { y: (parent.height - self.height) / 2; height: 28px; label: "Export"; enabled: !root.exporting && root.dur > 0; clicked => { root.export-trim(); } }
+                        if root.export-status != "": Text { text: root.export-status; font-family: Theme.body-font; font-size: 12px; color: Theme.muted; vertical-alignment: center; }
                         Rectangle { horizontal-stretch: 1; }
-                        if !root.player-confirming: IconButton { y: (parent.height - self.height) / 2; icon: root.muted ? "mute" : "volume"; clicked => { root.toggle-mute(); } }
-                        if !root.player-confirming: VolumeSlider {
+                        IconButton { y: (parent.height - self.height) / 2; icon: root.muted ? "mute" : "volume"; clicked => { root.toggle-mute(); } }
+                        VolumeSlider {
                             y: (parent.height - self.height) / 2;
                             width: 80px;
                             value: root.volume;
                             changed(v) => { root.set-volume(v); }
                         }
-                        if !root.player-confirming: IconButton { y: (parent.height - self.height) / 2; icon: "external"; clicked => { root.open-external(); } }
-                        if !root.player-confirming: IconButton { y: (parent.height - self.height) / 2; icon: "folder"; clicked => { root.show-folder(); } }
-                        if !root.player-confirming: IconButton { y: (parent.height - self.height) / 2; icon: "trash"; clicked => { root.player-confirming = true; } }
-                        if !root.player-confirming: IconButton { y: (parent.height - self.height) / 2; icon: "fullscreen"; clicked => { root.toggle-fullscreen(); } }
-                        if root.player-confirming: Text { text: "Delete this clip? This can't be undone."; font-family: Theme.body-font; font-size: 12px; font-weight: 600; color: Theme.red; vertical-alignment: center; }
-                        if root.player-confirming: TextButton { label: "Keep"; clicked => { root.player-confirming = false; } }
-                        if root.player-confirming: TextButton { label: "Delete"; danger: true; clicked => { root.delete-current(); } }
+                        IconButton { y: (parent.height - self.height) / 2; icon: "external"; clicked => { root.open-external(); } }
+                        IconButton { y: (parent.height - self.height) / 2; icon: "folder"; clicked => { root.show-folder(); } }
+                        IconButton { y: (parent.height - self.height) / 2; icon: "trash"; clicked => { root.ask-delete-current(); } }
+                        IconButton { y: (parent.height - self.height) / 2; icon: "fullscreen"; clicked => { root.toggle-fullscreen(); } }
                     }
                 }
                 if !root.fullscreen: VerticalLayout {
@@ -711,6 +1104,79 @@ export component Library inherits Window {
                     padding-right: 16px;
                     padding-bottom: 16px;
                     spacing: 2px;
+                    // The trim ruler sits in the lane column, over every lane.
+                    HorizontalLayout {
+                        spacing: 8px;
+                        height: 18px;
+                        Rectangle { width: 188px; }
+                        ruler := Rectangle {
+                            horizontal-stretch: 1;
+                            border-radius: 6px;
+                            background: Theme.sidebar;
+                            clip: true;
+                            Rectangle {
+                                x: parent.width * root.trim-in-frac;
+                                width: parent.width * (root.trim-out-frac - root.trim-in-frac);
+                                height: 100%;
+                                background: #ff3b2f30;
+                            }
+                            Rectangle {
+                                x: parent.width * root.shown-frac - 1px;
+                                width: 2px;
+                                height: 100%;
+                                background: Theme.red;
+                            }
+                            Rectangle {
+                                x: parent.width * root.trim-in-frac - 4px;
+                                width: 8px;
+                                height: 100%;
+                                background: Theme.red;
+                            }
+                            Rectangle {
+                                x: parent.width * root.trim-out-frac - 4px;
+                                width: 8px;
+                                height: 100%;
+                                background: Theme.red;
+                            }
+                            // One area for the whole row: near a handle it drags
+                            // that handle, anywhere else it scrubs like a lane.
+                            TouchArea {
+                                property <int> handle: 0;
+                                pure function time-at() -> float {
+                                    clamp(self.mouse-x / max(parent.width, 1px), 0, 1) * root.dur
+                                }
+                                pointer-event(e) => {
+                                    if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                                        if abs(self.mouse-x - parent.width * root.trim-in-frac) <= 8px || abs(self.mouse-x - parent.width * root.trim-out-frac) <= 8px {
+                                            self.handle = abs(self.mouse-x - parent.width * root.trim-in-frac) <= abs(self.mouse-x - parent.width * root.trim-out-frac) ? 1 : 2;
+                                            if self.handle == 1 { root.set-trim-in(self.time-at()); } else { root.set-trim-out(self.time-at()); }
+                                        } else {
+                                            root.scrubbing = true;
+                                            root.scrub-pos = self.time-at();
+                                            root.seek(root.scrub-pos);
+                                        }
+                                    } else if e.kind == PointerEventKind.up && e.button == PointerEventButton.left {
+                                        if self.handle == 0 && root.scrubbing { root.seek(root.scrub-pos); }
+                                        self.handle = 0;
+                                        root.scrubbing = false;
+                                    } else if e.kind == PointerEventKind.cancel {
+                                        self.handle = 0;
+                                        root.scrubbing = false;
+                                    }
+                                }
+                                moved => {
+                                    if self.pressed && self.handle == 1 {
+                                        root.set-trim-in(self.time-at());
+                                    } else if self.pressed && self.handle == 2 {
+                                        root.set-trim-out(self.time-at());
+                                    } else if self.pressed && root.scrubbing {
+                                        root.scrub-pos = self.time-at();
+                                        root.seek(root.scrub-pos);
+                                    }
+                                }
+                            }
+                        }
+                    }
                     for t[i] in root.tracks: HorizontalLayout {
                         spacing: 8px;
                         height: t.audio ? 36px : 48px;
@@ -774,6 +1240,20 @@ export component Library inherits Window {
                                 fill: Theme.muted;
                                 stroke: transparent;
                             }
+                            if root.trim-out-frac > root.trim-in-frac: Rectangle {
+                                x: 0;
+                                y: 0;
+                                height: 100%;
+                                width: parent.width * root.trim-in-frac;
+                                background: #000000a0;
+                            }
+                            if root.trim-out-frac > root.trim-in-frac: Rectangle {
+                                x: parent.width * root.trim-out-frac;
+                                y: 0;
+                                height: 100%;
+                                width: parent.width * (1 - root.trim-out-frac);
+                                background: #000000a0;
+                            }
                             Rectangle {
                                 x: 0;
                                 y: 0;
@@ -823,27 +1303,38 @@ export component Library inherits Window {
                 Text { text: "in any game to save the last \{root.seconds} s"; font-family: Theme.body-font; font-size: 12px; color: Theme.muted; vertical-alignment: center; }
             }
             if !root.player-open && select-mode: HorizontalLayout {
-                height: 44px;
+                height: 45px;
                 padding-left: 24px;
                 padding-right: 24px;
                 padding-top: 8px;
                 padding-bottom: 8px;
                 spacing: 8px;
                 Text {
-                    text: confirming ? (selected-count == 1 ? "Delete 1 clip? This can't be undone." : "Delete \{selected-count} clips? This can't be undone.") : selected-count == 0 ? "Select clips to delete" : "\{selected-count} selected";
+                    text: "\{selected-count} selected";
                     font-family: Theme.body-font;
                     font-size: 12px;
                     font-weight: 600;
-                    color: confirming ? Theme.red : Theme.text;
+                    color: Theme.text;
                     vertical-alignment: center;
                     horizontal-stretch: 1;
                 }
-                if !confirming: TextButton { label: "Select all"; clicked => { root.select-all(true); } }
-                if !confirming: TextButton { label: "Cancel"; clicked => { root.toggle-select-mode(); } }
-                if !confirming: TextButton { label: "Delete"; danger: true; enabled: selected-count > 0; clicked => { root.confirming = true; } }
-                if confirming: TextButton { label: "Keep"; clicked => { root.confirming = false; } }
-                if confirming: TextButton { label: "Delete"; danger: true; clicked => { root.delete-selected(); } }
+                TextButton { y: (parent.height - self.height) / 2; height: 28px; label: "Select all"; clicked => { root.select-all(true); } }
+                TextButton { y: (parent.height - self.height) / 2; height: 28px; label: "Cancel"; clicked => { root.toggle-select-mode(); } }
+                TextButton { y: (parent.height - self.height) / 2; height: 28px; danger: true; icon: "trash"; label: "Delete"; enabled: selected-count > 0; clicked => { root.ask-delete-selected(); } }
             }
+        }
+
+        // 16 px above the bottom of the grid area, centred in the main column.
+        if root.toast-t > 0 && !root.player-open: UndoToast {
+            opacity: root.toast-t;
+            property <length> main-left: root.total-count > 0 ? 248px : 0px;
+            property <length> footer: 1px + (root.select-mode ? 45px : 44px);
+            x: main-left + (parent.width - main-left - self.width) / 2;
+            y: parent.height - footer - 16px - self.height + (1 - root.toast-t) * 8px;
+            message: root.toast-message;
+            frac: root.toast-frac;
+            can-undo: root.toast-undo;
+            undo => { root.undo-trash(); }
         }
 
         if root.onboarding: Rectangle {
@@ -895,9 +1386,10 @@ export component Library inherits Window {
         }
 
         if popover: TouchArea { clicked => { root.popover = false; } }
-        if popover: Rectangle {
+        if root.pop-t > 0: poprect := Rectangle {
             x: parent.width - self.width - 52px;
-            y: 48px;
+            y: 48px - (1 - root.pop-t) * 6px;
+            opacity: root.pop-t;
             width: 300px;
             height: min(pop.preferred-height, root.height - 64px);
             background: Theme.card;
@@ -918,17 +1410,29 @@ export component Library inherits Window {
                 SettingRow {
                     title: "Quality";
                     note: root.quality-note;
-                    Segmented { options: ["Light", "High", "Max"]; selected: root.quality; picked(i) => { root.set-quality(i); } }
+                    Segmented { fill: true; options: ["Light", "High", "Max"]; selected: root.quality; picked(i) => { root.set-quality(i); } }
                 }
                 SettingRow {
                     title: "Duration";
                     note: root.duration-note;
-                    Segmented { mono: true; options: ["30 s", "60 s", "120 s"]; selected: root.duration; picked(i) => { root.set-duration(i); } }
+                    Segmented { fill: true; mono: true; options: ["30 s", "60 s", "120 s"]; selected: root.duration; picked(i) => { root.set-duration(i); } }
                 }
                 SettingRow {
                     title: "App audio";
                     note: "own track each";
-                    Toggles { rows: root.app-tracks; toggled(i) => { root.toggle-app-track(i); } }
+                    tiles := HorizontalLayout {
+                        spacing: 6px;
+                        height: 60px;
+                        // Equal thirds of the popover's inner width (its
+                        // literal width minus padding and the two gaps); a
+                        // `tiles.width` read would loop through the layout.
+                        for r[i] in root.app-tracks: SourceTile {
+                            width: (poprect.width - 32px - 12px) / 3;
+                            item: r;
+                            icon-name: i == 0 ? "gamepad" : i == 1 ? "headset" : "apps";
+                            clicked => { root.toggle-app-track(i); }
+                        }
+                    }
                 }
                 SettingRow {
                     title: "Microphone";
@@ -952,6 +1456,103 @@ export component Library inherits Window {
             }
         }
 
+        // Modal permanent-delete dialog: Esc or the scrim keeps the clips.
+        if root.dlg-t > 0: Rectangle {
+            background: #000000b8;
+            opacity: root.dlg-t;
+            TouchArea { clicked => { root.dialog-keep(); } }
+            Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: max(16px, (parent.height - self.height) / 2) + (1 - root.dlg-t) * 10px;
+                width: 440px;
+                height: dlg.preferred-height;
+                background: Theme.card;
+                border-radius: 14px;
+                border-width: 1px;
+                border-color: Theme.border;
+                drop-shadow-blur: 32px;
+                drop-shadow-color: #000000a0;
+                TouchArea { }
+                dlg := VerticalLayout {
+                    padding: 24px;
+                    spacing: 16px;
+                    VerticalLayout {
+                        spacing: 4px;
+                        Text { text: root.dialog-title; font-family: Theme.body-font; font-size: 20px; font-weight: 600; color: Theme.text; }
+                        Text { text: root.dialog-meta; font-family: Theme.mono-font; font-size: 11px; color: Theme.muted; }
+                    }
+                    Rectangle {
+                        height: min(186px, rows.preferred-height);
+                        background: Theme.bg;
+                        border-radius: 8px;
+                        border-width: 1px;
+                        border-color: Theme.border;
+                        clip: true;
+                        Flickable {
+                            width: 100%;
+                            height: 100%;
+                            content-height: rows.preferred-height;
+                            rows := VerticalLayout {
+                                for r[i] in root.dialog-rows: VerticalLayout {
+                                    if i > 0: Rectangle { height: 1px; background: Theme.divider; }
+                                    HorizontalLayout {
+                                        height: 52px;
+                                        padding-left: 8px;
+                                        padding-right: 12px;
+                                        spacing: 10px;
+                                        Rectangle {
+                                            width: 64px;
+                                            height: 36px;
+                                            border-radius: 4px;
+                                            clip: true;
+                                            background: Theme.card;
+                                            y: (parent.height - 36px) / 2;
+                                            Image { width: 100%; height: 100%; source: r.thumb; image-fit: cover; }
+                                        }
+                                        VerticalLayout {
+                                            spacing: 3px;
+                                            horizontal-stretch: 1;
+                                            alignment: center;
+                                            HorizontalLayout {
+                                                spacing: 6px;
+                                                if r.icon.width > 0: Rectangle {
+                                                    width: 16px;
+                                                    height: 16px;
+                                                    border-radius: 4px;
+                                                    clip: true;
+                                                    y: (parent.height - self.height) / 2;
+                                                    Image { width: 100%; height: 100%; source: r.icon; image-fit: cover; }
+                                                }
+                                                if r.icon.width == 0 && r.initial != "": IconBadge {
+                                                    initial: r.initial;
+                                                    y: (parent.height - self.height) / 2;
+                                                }
+                                                Text { text: r.title; font-family: Theme.body-font; font-size: 13px; font-weight: 600; color: Theme.text; overflow: elide; vertical-alignment: center; horizontal-stretch: 1; }
+                                            }
+                                            Text { text: r.when + (r.exported ? " · Exported" : ""); font-family: Theme.mono-font; font-size: 10px; color: Theme.muted; }
+                                        }
+                                        VerticalLayout {
+                                            spacing: 3px;
+                                            alignment: center;
+                                            Text { text: r.length; font-family: Theme.mono-font; font-size: 11px; color: Theme.text; horizontal-alignment: right; }
+                                            Text { text: r.size; font-family: Theme.mono-font; font-size: 10px; color: Theme.muted; horizontal-alignment: right; }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Text { text: root.dialog-body; wrap: word-wrap; font-family: Theme.body-font; font-size: 13px; color: Theme.muted; }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: "Esc to keep"; font-family: Theme.mono-font; font-size: 10px; color: Theme.faint; vertical-alignment: center; horizontal-stretch: 1; }
+                        TextButton { y: (parent.height - self.height) / 2; height: 28px; label: "Keep"; clicked => { root.dialog-keep(); } }
+                        TextButton { y: (parent.height - self.height) / 2; height: 28px; danger: true; label: "Delete"; clicked => { root.dialog-confirm(); } }
+                    }
+                }
+            }
+        }
+
         // Frameless window: resize handles along the edges, on top of everything.
         if !root.fullscreen: Rectangle {
             property <length> edge: 6px;
@@ -966,5 +1567,13 @@ export component Library inherits Window {
             ResizeHandle { x: parent.width - corner; y: parent.height - corner; width: corner; height: corner; cursor: MouseCursor.nwse-resize; dir: 7; resize(d, x, y) => { root.resize(d, x, y); } }
         }
     }
+
+    // "Exported" self-clears so the status doesn't go stale.
+    Timer {
+        interval: 3s;
+        running: root.export-status == "Exported";
+        triggered => { root.export-status = ""; }
+    }
+
     init => { fs.focus(); }
 }

@@ -8,15 +8,19 @@ use std::time::SystemTime;
 pub struct Clip {
     pub path: PathBuf,
     pub title: String,
+    /// The slug before the `_YYYY-MM-DD_` stamp: the grouping key that a
+    /// Steam or .desktop name resolves back to ("clip" for unnamed clips).
+    pub game: String,
+    /// Written by the trim feature: a `_trim` segment after the timestamp.
+    pub exported: bool,
     pub seconds: Option<f64>,
+    pub bytes: u64,
     pub modified: SystemTime,
 }
 
-/// `Elden Ring` + now -> `Elden_Ring_2026-11-19_1452.mp4`, unique in `dir`.
-pub fn new_path(dir: &Path, game: Option<&str>) -> PathBuf {
-    let slug: String = game
-        .unwrap_or("clip")
-        .chars()
+/// The file-name-safe form of a game name: `R.E.P.O.` -> `R_E_P_O_`.
+pub fn slug(name: &str) -> String {
+    name.chars()
         .map(|c| {
             if c.is_alphanumeric() || c == '-' {
                 c
@@ -24,7 +28,12 @@ pub fn new_path(dir: &Path, game: Option<&str>) -> PathBuf {
                 '_'
             }
         })
-        .collect();
+        .collect()
+}
+
+/// `Elden Ring` + now -> `Elden_Ring_2026-11-19_1452.mp4`, unique in `dir`.
+pub fn new_path(dir: &Path, game: Option<&str>) -> PathBuf {
+    let slug = slug(game.unwrap_or("clip"));
     let stamp = gstreamer::glib::DateTime::now_local()
         .and_then(|t| t.format("%Y-%m-%d_%H%M%S"))
         .map(|s| s.to_string())
@@ -45,12 +54,32 @@ pub fn unique_path(dir: &Path, name: &str) -> PathBuf {
     path
 }
 
+/// (grouping slug, is-a-trim-export) from a clip stem: the slug is
+/// everything before the `_YYYY-MM-DD` segment, and a `_trim`/`_trim-N`
+/// segment after the timestamp marks an exported clip.
+fn game_of(stem: &str) -> (String, bool) {
+    let parts: Vec<&str> = stem.split('_').collect();
+    let Some(i) = date_pos(&parts) else {
+        return (stem.to_owned(), false);
+    };
+    (
+        parts[..i].join("_"),
+        parts[i + 1..]
+            .iter()
+            .any(|p| *p == "trim" || p.starts_with("trim-")),
+    )
+}
+
+fn date_pos(parts: &[&str]) -> Option<usize> {
+    parts
+        .iter()
+        .position(|p| p.len() == 10 && p.as_bytes()[4] == b'-' && p.as_bytes()[7] == b'-')
+}
+
 /// Game name from a clip file name: everything before the `_YYYY-MM-DD_` stamp.
 fn title_of(stem: &str) -> String {
     let parts: Vec<&str> = stem.split('_').collect();
-    let date = parts
-        .iter()
-        .position(|p| p.len() == 10 && p.as_bytes()[4] == b'-' && p.as_bytes()[7] == b'-');
+    let date = date_pos(&parts);
     let name = match date {
         Some(i) if i > 0 => parts[..i].join(" "),
         _ => stem.replace('_', " "),
@@ -67,26 +96,37 @@ pub fn list(dir: &Path) -> Vec<Clip> {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
-    let mut clips: Vec<(SystemTime, PathBuf)> = rd
+    let mut clips: Vec<(SystemTime, u64, PathBuf)> = rd
         .flatten()
         .filter(|e| e.path().extension().is_some_and(|x| x == "mp4"))
-        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .filter_map(|e| {
+            let m = e.metadata().ok()?;
+            Some((m.modified().ok()?, m.len(), e.path()))
+        })
         .collect();
     clips.sort_by(|a, b| b.0.cmp(&a.0));
     clips
         .into_iter()
-        .map(|(modified, path)| Clip {
-            title: title_of(&path.file_stem().unwrap_or_default().to_string_lossy()),
-            seconds: mp4_seconds(&path),
-            path,
-            modified,
+        .map(|(modified, bytes, path)| {
+            let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+            let (game, exported) = game_of(&stem);
+            Clip {
+                title: title_of(&stem),
+                game,
+                exported,
+                seconds: mp4_seconds(&path),
+                bytes,
+                path,
+                modified,
+            }
         })
         .collect()
 }
 
-/// Deletes the given clips, but only `.mp4` files that sit directly in `dir`.
-/// Returns the paths that were removed.
-pub fn delete(dir: &Path, paths: &[PathBuf]) -> Vec<PathBuf> {
+/// The paths from `paths` that are safe to touch: `.mp4` files that sit
+/// directly in `dir`. Used by `trash` so it can't be
+/// pointed at files outside the clips folder.
+fn clips_in_dir<'a>(dir: &Path, paths: &'a [PathBuf]) -> Vec<&'a PathBuf> {
     let Ok(dir) = dir.canonicalize() else {
         return Vec::new();
     };
@@ -94,15 +134,66 @@ pub fn delete(dir: &Path, paths: &[PathBuf]) -> Vec<PathBuf> {
         .iter()
         .filter(|p| p.extension().is_some_and(|x| x == "mp4"))
         .filter(|p| p.parent().and_then(|d| d.canonicalize().ok()).as_deref() == Some(&dir))
-        .filter(|p| match std::fs::remove_file(p) {
+        .collect()
+}
+
+/// Moves the given clips to the freedesktop Trash (same safety filter as
+/// the safety filter). Returns the paths that were trashed; a clip that wouldn't go
+/// is left alone rather than deleted.
+pub fn trash(dir: &Path, paths: &[PathBuf]) -> Vec<PathBuf> {
+    clips_in_dir(dir, paths)
+        .into_iter()
+        .filter(|p| match trash::delete(p) {
             Ok(()) => true,
             Err(e) => {
-                eprintln!("delete {}: {e}", p.display());
+                eprintln!("trash {}: {e}", p.display());
                 false
             }
         })
         .cloned()
         .collect()
+}
+
+/// Restores `paths` (names as they were in `dir`) back from the Trash,
+/// picking the most recently trashed entry for each name. Returns the paths
+/// that reappeared.
+pub fn untrash(dir: &Path, paths: &[PathBuf]) -> Vec<PathBuf> {
+    let Ok(dir) = dir.canonicalize() else {
+        return Vec::new();
+    };
+    let Ok(items) = trash::os_limited::list() else {
+        return Vec::new();
+    };
+    let mut chosen = Vec::new();
+    let mut wanted = Vec::new();
+    for p in paths {
+        if p.extension().is_none_or(|x| x != "mp4") {
+            continue;
+        }
+        let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(item) = items
+            .iter()
+            .filter(|i| i.name == name)
+            .filter(|i| {
+                i.original_parent
+                    .canonicalize()
+                    .as_deref()
+                    .unwrap_or(&i.original_parent)
+                    == dir
+            })
+            .max_by_key(|i| i.time_deleted)
+        else {
+            continue;
+        };
+        chosen.push(item.clone());
+        wanted.push(p.clone());
+    }
+    if let Err(e) = trash::os_limited::restore_all(chosen) {
+        eprintln!("restore from trash: {e}");
+    }
+    wanted.into_iter().filter(|p| p.exists()).collect()
 }
 
 /// Total size and count of the clips in `dir`.
@@ -175,17 +266,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn delete_only_touches_clips_in_dir() {
-        let root = std::env::temp_dir().join(format!("clip-recorder-del-{}", std::process::id()));
+    fn filter_keeps_only_clips_in_dir() {
+        let root = std::env::temp_dir().join(format!("clip-recorder-filt-{}", std::process::id()));
         let dir = root.join("clips");
-        std::fs::create_dir_all(&dir).unwrap();
-        let (a, txt, outside) = (dir.join("a.mp4"), dir.join("note.txt"), root.join("b.mp4"));
-        for f in [&a, &txt, &outside] {
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let keep = dir.join("a.mp4");
+        let paths = vec![
+            keep.clone(),
+            dir.join("note.txt"),
+            sub.join("nested.mp4"),
+            root.join("outside.mp4"),
+            dir.join("link.mp4"),
+        ];
+        for f in &paths[..4] {
             std::fs::write(f, b"x").unwrap();
         }
-        let gone = delete(&dir, &[a.clone(), txt.clone(), outside.clone()]);
-        assert_eq!(gone, vec![a.clone()]);
-        assert!(!a.exists() && txt.exists() && outside.exists());
+        // A symlink pointing at a real clip inside the dir still resolves
+        // through its parent, so it counts too.
+        std::os::unix::fs::symlink(&keep, &paths[4]).unwrap();
+        assert_eq!(clips_in_dir(&dir, &paths), vec![&keep, &paths[4]]);
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -194,5 +294,33 @@ mod tests {
         assert_eq!(title_of("Elden_Ring_2026-11-19_144930"), "Elden Ring");
         assert_eq!(title_of("clip_2026-11-19_144930-2"), "Clip");
         assert_eq!(title_of("whatever"), "whatever");
+    }
+
+    #[test]
+    fn slugs_names() {
+        assert_eq!(slug("Elden Ring"), "Elden_Ring");
+        assert_eq!(slug("R.E.P.O."), "R_E_P_O_");
+        assert_eq!(slug("clip"), "clip");
+    }
+
+    #[test]
+    fn game_keys_and_exports() {
+        assert_eq!(
+            game_of("R_E_P_O__2026-11-22_224859_trim-2"),
+            ("R_E_P_O_".to_owned(), true)
+        );
+        assert_eq!(
+            game_of("R_E_P_O__2026-11-22_224859_trim"),
+            ("R_E_P_O_".to_owned(), true)
+        );
+        assert_eq!(
+            game_of("clip_2026-11-19_144930-2"),
+            ("clip".to_owned(), false)
+        );
+        assert_eq!(
+            game_of("Elden_Ring_2026-11-19_144930"),
+            ("Elden_Ring".to_owned(), false)
+        );
+        assert_eq!(game_of("whatever"), ("whatever".to_owned(), false));
     }
 }

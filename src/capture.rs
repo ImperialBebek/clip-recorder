@@ -746,7 +746,7 @@ fn build_category(
 }
 
 /// AAC plays everywhere an MP4 does; Opus is the fallback when no AAC encoder is installed.
-fn audio_encoder() -> Result<Vec<gst::Element>> {
+pub(crate) fn audio_encoder() -> Result<Vec<gst::Element>> {
     for (name, props) in [
         ("fdkaacenc", &[("bitrate", "160000")][..]),
         ("avenc_aac", &[("bitrate", "160000")][..]),

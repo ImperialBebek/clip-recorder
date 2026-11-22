@@ -8,6 +8,8 @@ export component Osd inherits Window {
     in property <string> detail;
     // 0..1: indeterminate sweep while saving, remaining time once saved.
     in property <float> progress;
+    // The detected game's icon (state 3); empty shows the red dot instead.
+    in property <image> game-icon;
 
     width: 320px;
     height: 60px;
@@ -27,7 +29,15 @@ export component Osd inherits Window {
             padding-right: 14px;
             spacing: 12px;
             alignment: start;
-            Rectangle {
+            if state == 3 && game-icon.width > 0: Rectangle {
+                y: (parent.height - 32px) / 2;
+                width: 32px;
+                height: 32px;
+                border-radius: 8px;
+                clip: true;
+                Image { width: 100%; height: 100%; source: game-icon; image-fit: cover; }
+            }
+            if !(state == 3 && game-icon.width > 0): Rectangle {
                 y: (parent.height - 32px) / 2;
                 width: 32px;
                 height: 32px;

@@ -3,13 +3,13 @@
 //! recorder over the control socket, so the recorder never loads a GUI.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use gstreamer as gst;
@@ -26,6 +26,27 @@ use crate::platform::{self, ipc};
 slint::include_modules!();
 
 type Status = HashMap<String, String>;
+
+/// The export thread's report: (clip generation, error text if it failed).
+type ExportDone = Arc<Mutex<Option<(u64, Option<String>)>>>;
+
+/// What `games::lookup` resolved for a slug, with the icon already loaded.
+struct GameUi {
+    name: Option<String>,
+    icon: Option<slint::Image>,
+}
+
+/// The lookup worker's reports: (slug, name, icon path to load on the UI thread).
+type GameDone = Arc<Mutex<Vec<(String, Option<String>, Option<PathBuf>)>>>;
+
+/// First character of `name` upper-cased, for the badge when a game has no icon.
+fn initial(name: &str) -> SharedString {
+    name.chars()
+        .next()
+        .map(|c| c.to_uppercase().collect::<String>())
+        .unwrap_or_default()
+        .into()
+}
 
 fn spawn_detached(args: &[&str]) {
     if let Ok(exe) = std::env::current_exe() {
@@ -53,13 +74,10 @@ fn request_async(cmd: &'static str) {
     });
 }
 
-/// Recounts the selected cards; no selection means nothing left to confirm.
+/// Recounts the selected cards into the footer's "n selected" label.
 fn sync_selection(ui: &Library) {
     let n = ui.get_clips().iter().filter(|c| c.selected).count();
     ui.set_selected_count(n as i32);
-    if n == 0 {
-        ui.set_confirming(false);
-    }
 }
 
 /// Left edge of the card grid, matching the 24 px padding in `library.slint`.
@@ -236,8 +254,9 @@ fn make_thumb(clip: &Path, out: &Path) -> Result<()> {
     result
 }
 
-/// Makes missing thumbnails off the UI thread and hands each one back.
-fn thumb_worker(ui: slint::Weak<Library>) -> std::sync::mpsc::Sender<PathBuf> {
+/// Makes missing thumbnails off the UI thread and hands each one back
+/// through `done` (the poll timer loads the image and stores it on the card).
+fn thumb_worker(done: Arc<Mutex<Vec<(PathBuf, PathBuf)>>>) -> std::sync::mpsc::Sender<PathBuf> {
     let (tx, rx) = std::sync::mpsc::channel::<PathBuf>();
     std::thread::spawn(move || {
         if gst::init().is_err() {
@@ -249,20 +268,27 @@ fn thumb_worker(ui: slint::Weak<Library>) -> std::sync::mpsc::Sender<PathBuf> {
                 eprintln!("thumbnail {}: {e:#}", clip.display());
                 continue;
             }
-            let ui = ui.clone();
-            let _ = slint::invoke_from_event_loop(move || {
-                let Some(ui) = ui.upgrade() else { return };
-                let Ok(img) = slint::Image::load_from_path(&out) else {
-                    return;
-                };
-                let model = ui.get_clips();
-                let path = clip.display().to_string();
-                if let Some(i) = model.iter().position(|c| c.path == path) {
-                    let mut c = model.row_data(i).unwrap();
-                    c.thumb = img;
-                    model.set_row_data(i, c);
-                }
-            });
+            done.lock().unwrap().push((clip, out));
+        }
+    });
+    tx
+}
+
+/// Resolves game slugs to display names and icon paths (Steam manifests can
+/// sit on a spinning library disk). Images load back on the UI thread.
+fn game_worker(done: GameDone) -> std::sync::mpsc::Sender<Vec<String>> {
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<String>>();
+    std::thread::spawn(move || {
+        for slugs in rx {
+            let found = crate::games::lookup(&slugs);
+            done.lock().unwrap().extend(slugs.into_iter().map(|slug| {
+                let i = found.get(&slug);
+                (
+                    slug,
+                    i.and_then(|i| i.name.clone()),
+                    i.and_then(|i| i.icon.clone()),
+                )
+            }));
         }
     });
     tx
@@ -423,6 +449,25 @@ fn wave_path(peaks: &[f32]) -> String {
     s
 }
 
+/// The export thread's job: compute the keyframe index here if the player
+/// hasn't finished it yet, snap the cut onto one, and write the clip.
+fn export_trimmed(
+    src: &Path,
+    keys: Vec<f64>,
+    tin: f64,
+    tout: f64,
+    mix: &[(f64, bool)],
+    out: &Path,
+) -> Result<()> {
+    let keys = if keys.is_empty() {
+        crate::trim::keyframes(src).unwrap_or_default()
+    } else {
+        keys
+    };
+    let start = crate::trim::snap_start(&keys, tin);
+    crate::trim::export(src, start, tout, mix, out)
+}
+
 /// Seconds as `m:ss`.
 fn clock(t: f32) -> String {
     let t = t.max(0.0).round() as u64;
@@ -442,7 +487,19 @@ pub fn library() -> Result<()> {
         ipc::tell_library(&activation.map_or("focus".to_owned(), |t| format!("focus {t}")));
         return Ok(());
     };
-    let thumbs = thumb_worker(ui.as_weak());
+    // Every card the folder holds; `clips` on the window is the filtered
+    // view of this, so filtering never re-lists files or re-loads thumbs.
+    let master: Rc<RefCell<Vec<ClipCard>>> = Rc::default();
+    // Resolved display name + icon per game slug, filled by the lookup worker.
+    let game_infos: Rc<RefCell<HashMap<String, GameUi>>> = Rc::default();
+    // Slugs the lookup worker is already resolving, so each is asked once.
+    let game_pending: Rc<RefCell<HashSet<String>>> = Rc::default();
+    // Worker results drained by the poll timer (Rc state can't cross threads):
+    // thumbnails -> (clip, png), games -> (slug, name, icon path).
+    let thumb_done: Arc<Mutex<Vec<(PathBuf, PathBuf)>>> = Arc::default();
+    let game_done: GameDone = Arc::default();
+    let thumbs = thumb_worker(thumb_done.clone());
+    let games = game_worker(game_done.clone());
     let output = Rc::new(RefCell::new(String::new()));
     let listed: Rc<RefCell<Option<Vec<(PathBuf, SystemTime)>>>> = Rc::default();
     // Device ids backing the "Microphone" choices, aligned with indices 2+.
@@ -509,6 +566,11 @@ pub fn library() -> Result<()> {
     let player: Rc<RefCell<Option<crate::player::Player>>> = Rc::default();
     let player_path: Rc<RefCell<Option<PathBuf>>> = Rc::default();
     let player_gen = Arc::new(AtomicU64::new(0));
+    // Keyframe times of the open clip, filled in on a worker thread; the
+    // generation keeps a stale result for a previous clip from being used.
+    let trim_keys: Arc<Mutex<(u64, Vec<f64>)>> = Arc::default();
+    // Export status handed back from the export thread to the poll timer.
+    let export_done: ExportDone = Arc::default();
     let pos_timer = Rc::new(Timer::default());
 
     // Opens `path` in the player page, replacing whatever played before.
@@ -516,6 +578,7 @@ pub fn library() -> Result<()> {
         let player = player.clone();
         let player_path = player_path.clone();
         let player_gen = player_gen.clone();
+        let trim_keys = trim_keys.clone();
         let pos_timer = pos_timer.clone();
         move |ui: &Library, path: &Path| {
             let gen = player_gen.fetch_add(1, Ordering::SeqCst) + 1;
@@ -665,19 +728,21 @@ pub fn library() -> Result<()> {
             p.play();
             *player.borrow_mut() = Some(p);
             *player_path.borrow_mut() = Some(path.to_path_buf());
-            let title = ui
+            let card = ui
                 .get_clips()
                 .iter()
-                .find(|c| Path::new(c.path.as_str()) == path)
-                .map(|c| c.title.clone())
-                .unwrap_or_else(|| {
-                    path.file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned()
-                        .into()
-                });
-            ui.set_player_title(title);
+                .find(|c| Path::new(c.path.as_str()) == path);
+            ui.set_player_title(card.as_ref().map(|c| c.title.clone()).unwrap_or_else(|| {
+                path.file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+                    .into()
+            }));
+            ui.set_player_icon(card.as_ref().map(|c| c.icon.clone()).unwrap_or_default());
+            ui.set_player_initial(
+                card.as_ref().map(|c| c.initial.clone()).unwrap_or_default(),
+            );
             ui.set_frame(slint::Image::default());
             ui.set_filmstrip(ModelRc::new(VecModel::from(
                 Vec::<slint::Image>::new(),
@@ -685,9 +750,28 @@ pub fn library() -> Result<()> {
             ui.set_tracks(ModelRc::new(VecModel::from(vec![video_lane()])));
             ui.set_pos(0.0);
             ui.set_dur(0.0);
+            ui.set_trim_in(0.0);
+            ui.set_trim_out(0.0);
+            ui.set_export_status("".into());
             ui.set_playing(true);
-            ui.set_player_confirming(false);
             ui.set_player_open(true);
+            // Where the trims can snap to; a stale result for the previous
+            // clip is dropped via the generation check.
+            *trim_keys.lock().unwrap() = (gen, Vec::new());
+            {
+                let player_gen = player_gen.clone();
+                let trim_keys = trim_keys.clone();
+                let path = path.to_path_buf();
+                std::thread::spawn(move || {
+                    let Ok(keys) = crate::trim::keyframes(&path) else {
+                        return;
+                    };
+                    let mut slot = trim_keys.lock().unwrap();
+                    if player_gen.load(Ordering::SeqCst) == gen {
+                        *slot = (gen, keys);
+                    }
+                });
+            }
             pos_timer.start(
                 TimerMode::Repeated,
                 Duration::from_millis(33),
@@ -702,9 +786,14 @@ pub fn library() -> Result<()> {
                             ui.set_dur(d.seconds_f64() as f32);
                         }
                         let dur = ui.get_dur();
+                        // The end of the clip is the default trim-out.
+                        if dur > 0.0 && ui.get_trim_out() <= 0.0 {
+                            ui.set_trim_out(dur);
+                        }
+                        let (tin, tout) = (ui.get_trim_in(), ui.get_trim_out());
                         // The scrub position owns the playhead while the user
                         // drags; a queued seek owns it right after release.
-                        let pos = if ui.get_scrubbing() {
+                        let mut pos = if ui.get_scrubbing() {
                             ui.get_scrub_pos()
                         } else if p.seeking() {
                             ui.get_pos()
@@ -718,9 +807,30 @@ pub fn library() -> Result<()> {
                             ui.set_pos(pos);
                             pos
                         };
+                        // A trimmed range loops: at trim-out, jump back to
+                        // trim-in. Covering the whole clip keeps normal EOS.
+                        if p.playing()
+                            && !ui.get_scrubbing()
+                            && tout > tin
+                            && tout < dur - 0.05
+                            && pos >= tout
+                        {
+                            p.seek(gst::ClockTime::from_seconds_f64(tin as f64));
+                            pos = tin;
+                            ui.set_pos(pos);
+                        }
                         ui.set_playing(p.playing());
                         ui.set_player_time(
                             format!("{} / {}", clock(pos), clock(dur)).into(),
+                        );
+                        ui.set_trim_label(
+                            format!(
+                                "{} – {} · {}s",
+                                clock(tin),
+                                clock(tout),
+                                (tout - tin).max(0.0).round() as u64
+                            )
+                            .into(),
                         );
                     }
                 },
@@ -729,9 +839,223 @@ pub fn library() -> Result<()> {
     };
     let open_clip = Rc::new(open_clip);
 
+    // The Undo toast: the batch it can restore (dir, original paths) and the
+    // clock driving its 6 s bar. A newer trash replaces the older batch.
+    let trashed: Rc<RefCell<(PathBuf, Vec<PathBuf>)>> = Rc::default();
+    let toast_at: Rc<Cell<Option<Instant>>> = Rc::default();
+    let toast_timer = Rc::new(Timer::default());
+    let show_toast = {
+        let weak = ui.as_weak();
+        let toast_at = toast_at.clone();
+        let toast_timer = toast_timer.clone();
+        move |ui: &Library, message: String, undo: bool| {
+            ui.set_toast_message(message.into());
+            ui.set_toast_undo(undo);
+            ui.set_toast_frac(1.0);
+            ui.set_toast_visible(true);
+            toast_at.set(Some(Instant::now()));
+            let weak2 = weak.clone();
+            let toast_at2 = toast_at.clone();
+            let timer2 = toast_timer.clone();
+            toast_timer.start(
+                TimerMode::Repeated,
+                Duration::from_millis(33),
+                move || {
+                    let Some(ui) = weak2.upgrade() else { return };
+                    let Some(at) = toast_at2.get() else { return };
+                    let left = 1.0 - at.elapsed().as_secs_f32() / 6.0;
+                    if left <= 0.0 {
+                        ui.set_toast_frac(0.0);
+                        ui.set_toast_visible(false);
+                        toast_at2.set(None);
+                        timer2.stop();
+                    } else {
+                        ui.set_toast_frac(left);
+                    }
+                },
+            );
+        }
+    };
+    let show_toast = Rc::new(show_toast);
+
+    // Moves `paths` to the Trash. On success it stores the batch for Undo
+    // and returns the trashed paths so the caller can word its toast; a
+    // clip that wouldn't go is left alone, not deleted.
+    let trash_files = {
+        let output = output.clone();
+        let trashed = trashed.clone();
+        let show_toast = show_toast.clone();
+        move |ui: &Library, paths: Vec<PathBuf>| -> Vec<PathBuf> {
+            if paths.is_empty() {
+                return Vec::new();
+            }
+            let dir = PathBuf::from(output.borrow().as_str());
+            let gone = clips::trash(&dir, &paths);
+            if gone.is_empty() {
+                (*show_toast)(ui, "Couldn't move to Trash".into(), false);
+            } else {
+                *trashed.borrow_mut() = (dir, gone.clone());
+            }
+            gone
+        }
+    };
+    let trash_files = Rc::new(trash_files);
+
+    // The clips the delete dialog would remove permanently: the selected
+    // cards, or the clip open in the player, staged when the dialog opens.
+    let dialog_paths: Rc<RefCell<Vec<PathBuf>>> = Rc::default();
+    let open_dialog = {
+        let master = master.clone();
+        let dialog_paths = dialog_paths.clone();
+        move |ui: &Library, paths: Vec<PathBuf>| {
+            if paths.is_empty() {
+                return;
+            }
+            *dialog_paths.borrow_mut() = paths.clone();
+            let cards = master.borrow();
+            let rows: Vec<ClipCard> = paths
+                .iter()
+                .filter_map(|p| {
+                    let path = p.display().to_string();
+                    cards.iter().find(|c| c.path == path).cloned()
+                })
+                .collect();
+            ui.set_dialog_rows(ModelRc::new(VecModel::from(rows)));
+            let secs: f64 = paths.iter().filter_map(|p| clips::mp4_seconds(p)).sum();
+            let bytes: u64 = paths
+                .iter()
+                .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
+                .sum();
+            let mb = (bytes + 500_000) / 1_000_000;
+            let folder = ui.get_folder_text();
+            let (title, meta, body) = if paths.len() == 1 {
+                (
+                    "Delete this clip?".to_owned(),
+                    format!("1 clip · {} · {mb} MB", clock(secs as f32)),
+                    format!("It moves to the Trash and leaves {folder}. You can undo right after."),
+                )
+            } else {
+                (
+                    format!("Delete {} clips?", paths.len()),
+                    format!(
+                        "{} clips · {} total · {mb} MB",
+                        paths.len(),
+                        clock(secs as f32)
+                    ),
+                    format!("They move to the Trash and leave {folder}. You can undo right after."),
+                )
+            };
+            ui.set_dialog_title(title.into());
+            ui.set_dialog_meta(meta.into());
+            ui.set_dialog_body(body.into());
+            ui.set_dialog_open(true);
+        }
+    };
+    let open_dialog = Rc::new(open_dialog);
+
+    // Rebuilds the visible `clips` model and the sidebar from `master`.
+    // `keep_sel` carries the current selection over (thumbnail and game-icon
+    // updates); a filter change passes false so selection and the delete
+    // confirmation start over.
+    let apply_filter = {
+        let master = master.clone();
+        let game_infos = game_infos.clone();
+        move |ui: &Library, keep_sel: bool| {
+            // A selected game that no longer has clips drops back to "All".
+            if !ui.get_game_filter().is_empty()
+                && !master
+                    .borrow()
+                    .iter()
+                    .any(|c| c.game == ui.get_game_filter())
+            {
+                ui.set_game_filter("".into());
+            }
+            let gf = ui.get_game_filter();
+            let exported = ui.get_exported_only();
+            let selected: HashSet<SharedString> = if keep_sel {
+                ui.get_clips()
+                    .iter()
+                    .filter(|c| c.selected)
+                    .map(|c| c.path)
+                    .collect()
+            } else {
+                HashSet::new()
+            };
+            let infos = game_infos.borrow();
+            let cards = master.borrow();
+            // The master list is newest-first, so first appearance order is
+            // "sorted by most recent clip" for the chips.
+            let mut seen = HashSet::new();
+            let mut chips = Vec::new();
+            for c in cards.iter() {
+                if seen.insert(c.game.clone()) {
+                    let info = infos.get(c.game.as_str());
+                    let name = info
+                        .and_then(|g| g.name.clone())
+                        .unwrap_or_else(|| c.title.trim_end().to_owned());
+                    chips.push(GameChip {
+                        key: c.game.clone(),
+                        name: name.clone().into(),
+                        icon: info.and_then(|g| g.icon.clone()).unwrap_or_default(),
+                        initial: initial(&name),
+                        count: cards.iter().filter(|x| x.game == c.game).count() as i32,
+                    });
+                }
+            }
+            let title = if gf.is_empty() {
+                "All clips".to_owned()
+            } else {
+                chips
+                    .iter()
+                    .find(|c| c.key == gf)
+                    .map(|c| c.name.to_string())
+                    .unwrap_or_default()
+            };
+            ui.set_header_title(title.into());
+            ui.set_games(ModelRc::new(VecModel::from(chips)));
+            ui.set_total_count(cards.len() as i32);
+            let visible: Vec<ClipCard> = cards
+                .iter()
+                .filter(|c| (gf.is_empty() || c.game == gf) && (!exported || c.exported))
+                .cloned()
+                .map(|mut c| {
+                    c.selected = selected.contains(&c.path);
+                    c
+                })
+                .collect();
+            // The scope is every clip the game filter lets through; the
+            // Exported segment can narrow it further.
+            let scope = cards
+                .iter()
+                .filter(|c| gf.is_empty() || c.game == gf)
+                .count();
+            ui.set_header_count(
+                if exported {
+                    format!("{} of {scope} clips", visible.len())
+                } else if scope == 1 {
+                    "1 clip".to_owned()
+                } else {
+                    format!("{scope} clips")
+                }
+                .into(),
+            );
+            ui.set_clips(ModelRc::new(VecModel::from(visible)));
+            if ui.get_clips().row_count() == 0 {
+                ui.set_select_mode(false);
+            }
+            sync_selection(ui);
+        }
+    };
+    let apply_filter = Rc::new(apply_filter);
+
     let refresh = {
         let ui = ui.as_weak();
         let output = output.clone();
+        let master = master.clone();
+        let game_infos = game_infos.clone();
+        let game_pending = game_pending.clone();
+        let games = games.clone();
+        let apply_filter = apply_filter.clone();
         move || {
             let Some(ui) = ui.upgrade() else { return };
             let s = ipc::status().ok();
@@ -756,12 +1080,19 @@ pub fn library() -> Result<()> {
                     String::new(),
                 ),
             };
+            let live_game = s
+                .as_ref()
+                .filter(|s| get(s, "state") == "live")
+                .map(|s| get(s, "game"))
+                .filter(|g| !g.is_empty())
+                .map(str::to_owned);
             let (live, label) = match s.as_ref().map(|s| get(s, "state")) {
-                Some("live") => {
-                    let game = s.as_ref().map_or("", |s| get(s, "game"));
-                    let what = if game.is_empty() { "screen" } else { game };
-                    (true, format!("Recording · {}", shorten(what, 26)))
-                }
+                Some("live") => (
+                    true,
+                    live_game
+                        .as_deref()
+                        .map_or_else(|| "Recording screen".to_owned(), |g| shorten(g, 26)),
+                ),
                 Some("idle") => (false, "Waiting for a game".to_owned()),
                 Some("paused") => (false, "Paused".to_owned()),
                 Some("setup") => (false, "Choose a screen".to_owned()),
@@ -771,6 +1102,25 @@ pub fn library() -> Result<()> {
             ui.set_screen_picker(s.as_ref().is_none_or(|s| get(s, "capture") != "game"));
             ui.set_live(live);
             ui.set_state_label(label.into());
+            // The pill shows the live game's icon; its slug shares the clips'
+            // naming space, so the same lookup as the cards applies.
+            if let Some(game) = &live_game {
+                let slug = clips::slug(game);
+                let info = game_infos
+                    .borrow()
+                    .get(&slug)
+                    .map(|i| (i.icon.clone(), i.name.clone()))
+                    .unwrap_or((None, None));
+                ui.set_pill_icon(info.0.unwrap_or_default());
+                ui.set_pill_initial(initial(info.1.as_deref().unwrap_or(game)));
+                let mut pending = game_pending.borrow_mut();
+                if !game_infos.borrow().contains_key(&slug) && pending.insert(slug.clone()) {
+                    let _ = games.send(vec![slug]);
+                }
+            } else {
+                ui.set_pill_icon(slint::Image::default());
+                ui.set_pill_initial(SharedString::default());
+            }
             ui.set_seconds(window as i32);
             if !hotkey.is_empty() || s.is_none() {
                 ui.set_hotkey(hotkey_keys(&hotkey));
@@ -812,9 +1162,13 @@ pub fn library() -> Result<()> {
                 return;
             }
             *listed.borrow_mut() = Some(sig);
-            let (bytes, _) = clips::usage(dir.as_ref());
-            ui.set_folder_text(format!("{folder} · {} MB", (bytes + 500_000) / 1_000_000).into());
+            let (bytes, count) = clips::usage(dir.as_ref());
+            ui.set_folder_text(folder.into());
+            ui.set_usage_text(
+                format!("{count} clips · {} MB", (bytes + 500_000) / 1_000_000).into(),
+            );
             let old = ui.get_clips();
+            let infos = game_infos.borrow();
             let cards: Vec<ClipCard> = clips
                 .into_iter()
                 .map(|c| {
@@ -824,26 +1178,56 @@ pub fn library() -> Result<()> {
                         .iter()
                         .find(|o| o.path == path && o.thumb.size().width > 0)
                         .map(|o| o.thumb)
+                        .or_else(|| {
+                            master
+                                .borrow()
+                                .iter()
+                                .find(|o| o.path == path && o.thumb.size().width > 0)
+                                .map(|o| o.thumb.clone())
+                        })
                         .or_else(|| cached_thumb(&c.path, c.modified))
                         .unwrap_or_else(|| {
                             let _ = thumbs.send(c.path.clone());
                             slint::Image::default()
                         });
+                    let info = infos.get(c.game.as_str());
+                    let title = info
+                        .and_then(|g| g.name.clone())
+                        .unwrap_or_else(|| c.title.clone());
                     ClipCard {
-                        title: c.title.into(),
+                        initial: initial(&title),
+                        title: title.into(),
                         when: when(c.modified).into(),
                         length: length(c.seconds).into(),
                         path: path.into(),
                         thumb,
                         selected,
+                        game: c.game.into(),
+                        exported: c.exported,
+                        icon: info.and_then(|g| g.icon.clone()).unwrap_or_default(),
+                        size: format!("{} MB", (c.bytes + 500_000) / 1_000_000).into(),
                     }
                 })
                 .collect();
-            ui.set_clips(ModelRc::new(VecModel::from(cards)));
-            if ui.get_clips().row_count() == 0 {
-                ui.set_select_mode(false);
+            drop(infos);
+            *master.borrow_mut() = cards;
+            // Names/icons for slugs not seen before resolve on the worker.
+            let new_slugs: Vec<String> = {
+                let infos = game_infos.borrow();
+                let mut pending = game_pending.borrow_mut();
+                master
+                    .borrow()
+                    .iter()
+                    .filter_map(|c| {
+                        let g = c.game.to_string();
+                        (!infos.contains_key(&g) && pending.insert(g.clone())).then_some(g)
+                    })
+                    .collect()
+            };
+            if !new_slugs.is_empty() {
+                let _ = games.send(new_slugs);
             }
-            sync_selection(&ui);
+            apply_filter(&ui, true);
         }
     };
     let refresh = Rc::new(refresh);
@@ -855,6 +1239,84 @@ pub fn library() -> Result<()> {
             TimerMode::Repeated,
             Duration::from_millis(1000),
             move || refresh(),
+        );
+    }
+    // Picks up the worker threads' results; faster than the grid refresh so
+    // "Exported" shows promptly. `refresh`, `master` and friends can't be
+    // captured by the workers (they're Rc), so everything comes back through
+    // shared slots and is applied here on the UI thread.
+    let export_timer = Timer::default();
+    {
+        let weak = ui.as_weak();
+        let player_gen = player_gen.clone();
+        let export_done = export_done.clone();
+        let thumb_done = thumb_done.clone();
+        let game_done = game_done.clone();
+        let master = master.clone();
+        let game_infos = game_infos.clone();
+        let game_pending = game_pending.clone();
+        let apply_filter = apply_filter.clone();
+        let refresh = refresh.clone();
+        export_timer.start(
+            TimerMode::Repeated,
+            Duration::from_millis(100),
+            move || {
+                let Some(ui) = weak.upgrade() else { return };
+                if let Some((gen, msg)) = export_done.lock().unwrap().take() {
+                    ui.set_exporting(false);
+                    if player_gen.load(Ordering::SeqCst) == gen {
+                        ui.set_export_status(
+                            msg.unwrap_or_else(|| "Exported".into()).into(),
+                        );
+                    }
+                    refresh();
+                }
+                let thumbs = std::mem::take(&mut *thumb_done.lock().unwrap());
+                if !thumbs.is_empty() {
+                    {
+                        let mut cards = master.borrow_mut();
+                        for (clip, png) in thumbs {
+                            let Ok(img) = slint::Image::load_from_path(&png)
+                            else {
+                                continue;
+                            };
+                            let path = clip.display().to_string();
+                            if let Some(c) = cards.iter_mut().find(|c| c.path == path) {
+                                c.thumb = img;
+                            }
+                        }
+                    }
+                    apply_filter(&ui, true);
+                }
+                let found = std::mem::take(&mut *game_done.lock().unwrap());
+                if !found.is_empty() {
+                    {
+                        let mut infos = game_infos.borrow_mut();
+                        for (slug, name, icon) in found {
+                            game_pending.borrow_mut().remove(&slug);
+                            let icon = icon
+                                .and_then(|p| slint::Image::load_from_path(&p).ok());
+                            infos.insert(slug, GameUi { name, icon });
+                        }
+                    }
+                    // Cards that were drawn with fallbacks get the resolved
+                    // name and icon now.
+                    let infos = game_infos.borrow();
+                    for c in master.borrow_mut().iter_mut() {
+                        let Some(g) = infos.get(c.game.as_str()) else {
+                            continue;
+                        };
+                        if let Some(name) = &g.name {
+                            c.title = name.clone().into();
+                            c.initial = initial(name);
+                        }
+                        if let Some(icon) = &g.icon {
+                            c.icon = icon.clone();
+                        }
+                    }
+                    apply_filter(&ui, true);
+                }
+            },
         );
     }
 
@@ -954,9 +1416,8 @@ pub fn library() -> Result<()> {
     }
     {
         let weak = ui.as_weak();
-        let output = output.clone();
-        let refresh = refresh.clone();
-        ui.on_delete_selected(move || {
+        let open_dialog = open_dialog.clone();
+        ui.on_ask_delete_selected(move || {
             let Some(ui) = weak.upgrade() else { return };
             let paths: Vec<PathBuf> = ui
                 .get_clips()
@@ -964,13 +1425,114 @@ pub fn library() -> Result<()> {
                 .filter(|c| c.selected)
                 .map(|c| PathBuf::from(c.path.as_str()))
                 .collect();
-            let dir = output.borrow().clone();
-            for gone in clips::delete(dir.as_ref(), &paths) {
-                let _ = std::fs::remove_file(thumb_path(&gone));
+            (*open_dialog)(&ui, paths);
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let trashed = trashed.clone();
+        let toast_at = toast_at.clone();
+        let toast_timer = toast_timer.clone();
+        let refresh = refresh.clone();
+        ui.on_undo_trash(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if !ui.get_toast_visible() {
+                return;
             }
-            ui.set_confirming(false);
+            let (dir, paths) = trashed.borrow().clone();
+            if !paths.is_empty() {
+                let n = clips::untrash(&dir, &paths).len();
+                if n < paths.len() {
+                    eprintln!("undo trash: {n} of {} clips restored", paths.len());
+                }
+                trashed.borrow_mut().1.clear();
+            }
+            toast_at.set(None);
+            toast_timer.stop();
+            ui.set_toast_visible(false);
+            refresh();
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_dialog_keep(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_dialog_open(false);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let trash_files = trash_files.clone();
+        let show_toast = show_toast.clone();
+        let dialog_paths = dialog_paths.clone();
+        let refresh = refresh.clone();
+        let open_clip = open_clip.clone();
+        ui.on_dialog_confirm(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_dialog_open(false);
+            let paths = std::mem::take(&mut *dialog_paths.borrow_mut());
+            if paths.is_empty() {
+                return;
+            }
+            // For the player dialog: where the clip sat in the list, to pick
+            // what plays next (next older, else previous, else back).
+            let idx = if ui.get_player_open() {
+                ui.get_clips()
+                    .iter()
+                    .position(|c| Path::new(c.path.as_str()) == paths[0])
+            } else {
+                None
+            };
+            let title = ui.get_player_title().to_string();
+            let gone = (*trash_files)(&ui, paths);
+            if gone.is_empty() {
+                return;
+            }
+            (*show_toast)(
+                &ui,
+                if ui.get_player_open() {
+                    format!("Moved {title} to Trash")
+                } else if gone.len() == 1 {
+                    "Moved 1 clip to Trash".to_owned()
+                } else {
+                    format!("Moved {} clips to Trash", gone.len())
+                },
+                true,
+            );
             ui.set_select_mode(false);
             refresh();
+            if ui.get_player_open() {
+                let model = ui.get_clips();
+                let n = model.row_count();
+                let next = match idx {
+                    Some(i) if i < n => Some(i),
+                    Some(i) if i > 0 => Some(i - 1),
+                    _ => None,
+                };
+                match next.and_then(|i| model.row_data(i)) {
+                    Some(c) => (*open_clip)(&ui, Path::new(c.path.as_str())),
+                    None => ui.invoke_player_back(),
+                }
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let apply_filter = apply_filter.clone();
+        ui.on_set_game_filter(move |key| {
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_game_filter(key);
+            apply_filter(&ui, false);
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let apply_filter = apply_filter.clone();
+        ui.on_toggle_exported(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_exported_only(!ui.get_exported_only());
+            apply_filter(&ui, false);
         });
     }
     ui.on_change_screen(|| request_async("reselect"));
@@ -1036,13 +1598,25 @@ pub fn library() -> Result<()> {
         });
     }
     {
+        let weak = ui.as_weak();
         let player = player.clone();
         ui.on_toggle_play(move || {
-            if let Some(p) = player.borrow().as_ref() {
-                if p.playing() {
-                    p.pause();
-                } else {
-                    p.play();
+            let borrow = player.borrow();
+            let Some(p) = borrow.as_ref() else { return };
+            if p.playing() {
+                p.pause();
+                return;
+            }
+            p.play();
+            // Start inside the trimmed range when the playhead is outside it;
+            // the seek is issued after play so it also wins over the EOS
+            // restart play() does on its own.
+            if let Some(ui) = weak.upgrade() {
+                let (tin, tout, pos) =
+                    (ui.get_trim_in(), ui.get_trim_out(), ui.get_pos());
+                if tout > tin && !(pos >= tin && pos < tout) {
+                    p.seek(gst::ClockTime::from_seconds_f64(tin as f64));
+                    ui.set_pos(tin);
                 }
             }
         });
@@ -1155,6 +1729,100 @@ pub fn library() -> Result<()> {
         });
     }
     {
+        let weak = ui.as_weak();
+        let player_gen = player_gen.clone();
+        let trim_keys = trim_keys.clone();
+        ui.on_set_trim_in(move |t| {
+            let Some(ui) = weak.upgrade() else { return };
+            let dur = ui.get_dur() as f64;
+            if dur <= 0.0 {
+                return;
+            }
+            let tout = ui.get_trim_out() as f64;
+            let keys = {
+                let slot = trim_keys.lock().unwrap();
+                if slot.0 == player_gen.load(Ordering::SeqCst) {
+                    slot.1.clone()
+                } else {
+                    Vec::new()
+                }
+            };
+            let snapped = crate::trim::snap_start(&keys, (t as f64).clamp(0.0, dur));
+            // Keep at least a second selected: land on the latest keyframe
+            // that still leaves room, or keep the current trim-in.
+            let snapped = if tout - snapped >= 1.0 {
+                snapped
+            } else {
+                match keys.iter().rev().find(|&&k| tout - k >= 1.0) {
+                    Some(&k) => k,
+                    None => return,
+                }
+            };
+            ui.set_trim_in(snapped as f32);
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_set_trim_out(move |t| {
+            let Some(ui) = weak.upgrade() else { return };
+            let (dur, tin) = (ui.get_dur(), ui.get_trim_in());
+            if dur <= 0.0 || tin + 1.0 > dur {
+                return;
+            }
+            ui.set_trim_out(t.clamp(tin + 1.0, dur));
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let player_path = player_path.clone();
+        let player_gen = player_gen.clone();
+        let trim_keys = trim_keys.clone();
+        let export_done = export_done.clone();
+        ui.on_export_trim(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if ui.get_exporting() {
+                return;
+            }
+            let Some(src) = player_path.borrow().clone() else {
+                return;
+            };
+            let (tin, tout) = (ui.get_trim_in() as f64, ui.get_trim_out() as f64);
+            if tout <= tin {
+                return;
+            }
+            // Lane 0 is the video; audio lanes map to tracks in order.
+            let mix: Vec<(f64, bool)> = ui
+                .get_tracks()
+                .iter()
+                .skip(1)
+                .filter(|t| t.audio)
+                .map(|t| (t.volume as f64, t.muted))
+                .collect();
+            let Some(dir) = src.parent().map(|d| d.to_path_buf()) else {
+                return;
+            };
+            let stem = src.file_stem().unwrap_or_default().to_string_lossy();
+            let out = clips::unique_path(&dir, &format!("{stem}_trim.mp4"));
+            let gen = player_gen.load(Ordering::SeqCst);
+            let keys = {
+                let slot = trim_keys.lock().unwrap();
+                if slot.0 == gen {
+                    slot.1.clone()
+                } else {
+                    Vec::new()
+                }
+            };
+            ui.set_exporting(true);
+            ui.set_export_status("Exporting…".into());
+            let export_done = export_done.clone();
+            std::thread::spawn(move || {
+                let result = export_trimmed(&src, keys, tin, tout, &mix, &out);
+                let msg = result.err().map(|e| shorten(&format!("{e:#}"), 40));
+                *export_done.lock().unwrap() = Some((gen, msg));
+            });
+        });
+    }
+    {
         let player_path = player_path.clone();
         ui.on_open_external(move || {
             if let Some(p) = player_path.borrow().as_ref() {
@@ -1197,40 +1865,21 @@ pub fn library() -> Result<()> {
                 ui.window().set_fullscreen(false);
             }
             ui.set_player_open(false);
-            ui.set_player_confirming(false);
         });
     }
     {
         let weak = ui.as_weak();
+        let player = player.clone();
         let player_path = player_path.clone();
-        let output = output.clone();
-        let refresh = refresh.clone();
-        let open_clip = open_clip.clone();
-        ui.on_delete_current(move || {
+        let open_dialog = open_dialog.clone();
+        ui.on_ask_delete_current(move || {
             let Some(ui) = weak.upgrade() else { return };
             let Some(path) = player_path.borrow().clone() else { return };
-            let idx = ui
-                .get_clips()
-                .iter()
-                .position(|c| Path::new(c.path.as_str()) == path);
-            let dir = output.borrow().clone();
-            for gone in clips::delete(dir.as_ref(), &[path]) {
-                let _ = std::fs::remove_file(thumb_path(&gone));
+            // Footage can't keep rolling under a dialog about deleting it.
+            if let Some(p) = player.borrow().as_ref() {
+                p.pause();
             }
-            ui.set_player_confirming(false);
-            refresh();
-            let model = ui.get_clips();
-            let n = model.row_count();
-            // The slot the deleted clip held now shows the next older clip.
-            let next = match idx {
-                Some(i) if i < n => Some(i),
-                Some(i) if i > 0 => Some(i - 1),
-                _ => None,
-            };
-            match next.and_then(|i| model.row_data(i)) {
-                Some(c) => (*open_clip)(&ui, Path::new(c.path.as_str())),
-                None => ui.invoke_player_back(),
-            }
+            (*open_dialog)(&ui, vec![path]);
         });
     }
     // Paused or idle: resume the running recorder; stopped: start one.
@@ -1307,6 +1956,47 @@ pub fn library() -> Result<()> {
                     .with_winit_window(|w| {
                         let _ = platform::activate::activate(w, &token);
                     });
+            }
+        });
+    }
+    // Visual-check aid: CLIP_UI_STATE=dialog|toast|popover|select|player|
+    // player-dialog opens that state once the thumbnails have had a moment.
+    if let Ok(state) = std::env::var("CLIP_UI_STATE") {
+        let weak = ui.as_weak();
+        let open_dialog = open_dialog.clone();
+        let show_toast = show_toast.clone();
+        let open_clip = open_clip.clone();
+        Timer::single_shot(Duration::from_millis(2000), move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let model = ui.get_clips();
+            let paths: Vec<PathBuf> = model
+                .iter()
+                .take(if state == "dialog" { 6 } else { 2 })
+                .map(|c| PathBuf::from(c.path.as_str()))
+                .collect();
+            let first = paths.first().cloned();
+            match state.as_str() {
+                "popover" => ui.set_popover(true),
+                "toast" => (*show_toast)(&ui, "Moved 2 clips to Trash".into(), true),
+                "select" | "dialog" => {
+                    ui.set_select_mode(true);
+                    map_selection(&ui, |i, _| i < 2);
+                    if state == "dialog" {
+                        (*open_dialog)(&ui, paths);
+                    }
+                }
+                "player" | "player-dialog" | "player-toast" => {
+                    if let Some(p) = first {
+                        (*open_clip)(&ui, &p);
+                        if state == "player-toast" {
+                            (*show_toast)(&ui, "Moved clip to Trash".into(), true);
+                        }
+                        if state == "player-dialog" {
+                            (*open_dialog)(&ui, vec![p]);
+                        }
+                    }
+                }
+                _ => {}
             }
         });
     }
