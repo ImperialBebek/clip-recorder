@@ -573,6 +573,34 @@ fn appsink(
     (sink.upcast(), rx)
 }
 
+/// Caps the frame rate without touching frame memory (works on DMA-BUF): the
+/// capsfilter pins the output framerate so `videorate max-rate` also engages
+/// on variable-rate (`framerate=0/1`) input. One structure per memory feature
+/// keeps the filter a subset of whatever feature the pipeline negotiated —
+/// `video/x-raw(ANY)` cannot be linked once GLMemory/DMABuf frames flow.
+/// The trailing range structures let a fixed source slower than the cap link.
+fn rate_cap(fps: u32) -> Result<Vec<gst::Element>> {
+    const FEATURES: [&str; 4] = [
+        "video/x-raw",
+        "video/x-raw(memory:DMABuf)",
+        "video/x-raw(memory:GLMemory)",
+        "video/x-raw(memory:VAMemory)",
+    ];
+    let pinned = FEATURES.iter().map(|raw| format!("{raw},framerate={fps}/1"));
+    let slower = FEATURES
+        .iter()
+        .map(|raw| format!("{raw},framerate=[1/1,{fps}/1]"));
+    let caps = pinned.chain(slower).collect::<Vec<_>>().join(";");
+    let fps = fps.to_string();
+    Ok(vec![
+        make(
+            "videorate",
+            &[("drop-only", "true"), ("max-rate", &fps)],
+        )?,
+        capsfilter(&caps)?,
+    ])
+}
+
 fn build_video(
     source: &VideoSource,
     s: &Settings,
@@ -590,11 +618,7 @@ fn build_video(
             ))?,
         ],
     };
-    // Caps the frame rate without touching frame memory (works on DMA-BUF).
-    chain.push(make(
-        "videorate",
-        &[("drop-only", "true"), ("max-rate", &fps)],
-    )?);
+    chain.extend(rate_cap(s.fps.max(1))?);
     chain.extend(enc.elements(s.kbps, s.fps.max(1))?);
     chain.push(make("h264parse", &[("config-interval", "-1")])?);
     chain.push(capsfilter("video/x-h264,stream-format=avc,alignment=au")?);
@@ -841,5 +865,147 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
+    }
+
+    /// `videorate max-rate` alone does nothing while the input caps say
+    /// `framerate=0/1` (what KWin's game capture negotiates); the capsfilter
+    /// makes the cap stick, and `drop-only` never duplicates frames.
+    #[test]
+    fn rate_cap_limits_variable_rate_input() {
+        gst::init().unwrap();
+        for (in_fps, lo, hi) in [(120u32, 115usize, 125usize), (40, 78, 82)] {
+            let pipeline = gst::Pipeline::new();
+            let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let caps_seen = Arc::new(Mutex::new(None));
+            let mut chain = vec![
+                make(
+                    "videotestsrc",
+                    &[
+                        ("is-live", "true"),
+                        ("num-buffers", &(in_fps * 2).to_string()),
+                        ("pattern", "ball"),
+                    ],
+                )
+                .unwrap(),
+                capsfilter(&format!(
+                    "video/x-raw,width=320,height=180,framerate={in_fps}/1"
+                ))
+                .unwrap(),
+            ];
+            let setter = make("capssetter", &[("join", "true")]).unwrap();
+            setter.set_property(
+                "caps",
+                gst::Caps::builder("video/x-raw")
+                    .field("framerate", gst::Fraction::new(0, 1))
+                    .build(),
+            );
+            chain.push(setter);
+            chain.extend(rate_cap(60).unwrap());
+            let (sink, _rx) = appsink({
+                let count = count.clone();
+                let caps_seen = caps_seen.clone();
+                move |caps, _| {
+                    if let Some(caps) = caps {
+                        *caps_seen.lock().unwrap() = Some(caps);
+                    }
+                    count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+            chain.push(sink);
+            add_chain(&pipeline, &chain).unwrap();
+            pipeline.set_state(gst::State::Playing).unwrap();
+            let eos = pipeline
+                .bus()
+                .unwrap()
+                .timed_pop_filtered(
+                    gst::ClockTime::from_seconds(10),
+                    &[gst::MessageType::Eos, gst::MessageType::Error],
+                )
+                .expect("no EOS within 10 s");
+            assert!(matches!(eos.view(), gst::MessageView::Eos(_)));
+            pipeline.set_state(gst::State::Null).unwrap();
+            let n = count.load(std::sync::atomic::Ordering::Relaxed);
+            assert!((lo..=hi).contains(&n), "{in_fps} fps in -> {n} out");
+            let caps = caps_seen.lock().unwrap().clone().unwrap();
+            let framerate = caps
+                .structure(0)
+                .unwrap()
+                .get::<gst::Fraction>("framerate")
+                .unwrap();
+            assert_eq!(framerate, gst::Fraction::new(60, 1));
+        }
+    }
+
+    #[test]
+    fn rate_cap_passes_slower_fixed_rate() {
+        gst::init().unwrap();
+        let pipeline = gst::Pipeline::new();
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut chain = vec![
+            make("videotestsrc", &[("is-live", "true"), ("num-buffers", "60")]).unwrap(),
+            capsfilter("video/x-raw,width=320,height=180,framerate=30/1").unwrap(),
+        ];
+        chain.extend(rate_cap(60).unwrap());
+        let (sink, _rx) = appsink({
+            let count = count.clone();
+            move |_, _| {
+                count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+        chain.push(sink);
+        add_chain(&pipeline, &chain).unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let msg = pipeline
+            .bus()
+            .unwrap()
+            .timed_pop_filtered(
+                gst::ClockTime::from_seconds(10),
+                &[gst::MessageType::Eos, gst::MessageType::Error],
+            )
+            .expect("no EOS within 10 s");
+        pipeline.set_state(gst::State::Null).unwrap();
+        assert!(matches!(msg.view(), gst::MessageView::Eos(_)), "{msg:?}");
+        assert_eq!(count.load(std::sync::atomic::Ordering::Relaxed), 60);
+    }
+
+    /// The capsfilter's feature structures must not force system memory:
+    /// GLMemory buffers have to flow through to the sink untouched.
+    #[test]
+    #[ignore = "needs a GL context; run manually"]
+    fn rate_cap_keeps_memory_features() {
+        gst::init().unwrap();
+        let pipeline = gst::Pipeline::new();
+        let mut chain = vec![
+            make("videotestsrc", &[("num-buffers", "240"), ("is-live", "true")])
+                .unwrap(),
+            make("glupload", &[]).unwrap(),
+            capsfilter("video/x-raw(memory:GLMemory),framerate=120/1").unwrap(),
+        ];
+        // Same variable-rate input the screen capture negotiates.
+        let setter = make("capssetter", &[("join", "true")]).unwrap();
+        setter.set_property(
+            "caps",
+            gst::Caps::builder("video/x-raw")
+                .field("framerate", gst::Fraction::new(0, 1))
+                .build(),
+        );
+        chain.push(setter);
+        chain.extend(rate_cap(60).unwrap());
+        chain.push(make("fakesink", &[]).unwrap());
+        add_chain(&pipeline, &chain).unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let eos = pipeline
+            .bus()
+            .unwrap()
+            .timed_pop_filtered(
+                gst::ClockTime::from_seconds(10),
+                &[gst::MessageType::Eos, gst::MessageType::Error],
+            )
+            .expect("no EOS within 10 s");
+        assert!(
+            matches!(eos.view(), gst::MessageView::Eos(_)),
+            "not negotiated: {eos:?}"
+        );
+        pipeline.set_state(gst::State::Null).unwrap();
     }
 }

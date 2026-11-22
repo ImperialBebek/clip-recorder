@@ -150,7 +150,7 @@ The library's popover sets Quality (Light/High/Max), Duration (30/60/120 s), the
 ```
 duration = 60
 fps = 60
-quality = high            # light 12 Mb/s, high 25 Mb/s, max 50 Mb/s
+quality = high            # light 8 Mb/s, high 12 Mb/s, max 20 Mb/s
 encoder = auto
 audio = auto            # auto: per-app tracks; pipewire/pulse: whole desktop, one track; none
 track_game = true       # Game track: only the game's audio
@@ -167,7 +167,7 @@ sound = true              # chime when a clip is saved
 check_updates = true      # daily release check
 ```
 
-RAM use is roughly `bitrate × duration`: 25 Mbit/s for 60 s is about 190 MB. "Pause when no game is running" (portal capture only; the KDE window capture always idles between games) stops the encoder and frees the buffer while no Steam, Lutris, Heroic, Wine or gamescope game is running.
+The frame rate cap also holds when the source delivers a variable rate, as KDE's game-window capture does on high-refresh monitors — a 180 Hz stream is still recorded at 60 fps. RAM use is roughly `bitrate × duration`: 12 Mbit/s for 60 s is about 90 MB. "Pause when no game is running" (portal capture only; the KDE window capture always idles between games) stops the encoder and frees the buffer while no Steam, Lutris, Heroic, Wine or gamescope game is running.
 
 ### Fonts
 
