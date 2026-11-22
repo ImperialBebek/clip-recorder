@@ -64,7 +64,8 @@ impl Encoder {
     /// Elements from raw frames to H.264 access units, colour conversion included.
     /// Hardware paths convert on the GPU so DMA-BUF frames never touch the CPU.
     pub fn elements(self, kbps: u32, gop: u32) -> Result<Vec<gst::Element>> {
-        let va_kbps = va_bitrate(kbps, &va_vendor()).to_string();
+        let vendor = va_vendor();
+        let va_kbps = va_bitrate(kbps, &vendor).to_string();
         let kbps = kbps.to_string();
         let gop = gop.to_string();
         Ok(match self {
@@ -85,7 +86,8 @@ impl Encoder {
                             ("cpb-size", &va_kbps),
                             ("key-int-max", &gop),
                             ("b-frames", "0"),
-                            ("target-usage", "7"),
+                            ("target-usage", va_target_usage(&vendor)),
+                            ("ref-frames", "1"),
                         ],
                     )?,
                 ]
@@ -160,6 +162,17 @@ fn va_vendor() -> String {
         .unwrap_or_default()
 }
 
+/// Intel reads target-usage 7 as fastest, but Mesa hands it to AMD as quality
+/// level 7: levels 4 and up took ~4.9 ms of VCN time per 1440p frame against
+/// ~2.7 ms for levels 1-3 (with one reference frame), for under 0.1 dB PSNR.
+fn va_target_usage(vendor: &str) -> &'static str {
+    if vendor == "0x1002" {
+        "2"
+    } else {
+        "7"
+    }
+}
+
 /// The bitrate to ask the VA encoder for so clips come out at `kbps`: AMD's
 /// CBR writes about 20% over its target on game footage (measured 14.4 Mb/s
 /// for 12 Mb/s), so it is asked for 5/6 of the target.
@@ -174,6 +187,12 @@ fn va_bitrate(kbps: u32, vendor: &str) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn amd_va_uses_fast_target_usage() {
+        assert_eq!(va_target_usage("0x1002"), "2");
+        assert_eq!(va_target_usage("0x8086"), "7");
+    }
 
     #[test]
     fn calibrates_amd_va_bitrate() {
