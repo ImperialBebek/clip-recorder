@@ -576,8 +576,9 @@ fn appsink(
 /// Caps the frame rate without touching frame memory (works on DMA-BUF):
 /// `videorate max-rate` doesn't engage on variable-rate (`framerate=0/1`)
 /// input and older GStreamer can't renegotiate it, so a pad probe drops
-/// frames above the cap by timestamp while a second probe rewrites the caps
-/// event to a fixed `{fps}/1` so CBR stays honest. `identity` is used rather
+/// frames above the cap by timestamp while a second probe rewrites a variable
+/// or faster caps rate to a fixed `{fps}/1` so CBR stays honest (a slower
+/// fixed rate is left as is). `identity` is used rather
 /// than `capssetter`, which answers upstream caps queries with ANY and would
 /// strip the DMA-BUF constraints pipewiresrc negotiates against.
 fn rate_cap(fps: u32) -> Result<Vec<gst::Element>> {
@@ -608,9 +609,13 @@ fn rate_cap(fps: u32) -> Result<Vec<gst::Element>> {
                 return gst::PadProbeReturn::Ok;
             };
             let mut caps = caps_event.caps().to_owned();
+            let cap = gst::Fraction::new(fps as i32, 1);
             for i in 0..caps.size() {
                 if let Some(structure) = caps.make_mut().structure_mut(i) {
-                    structure.set("framerate", gst::Fraction::new(fps as i32, 1));
+                    let rate = structure.get::<gst::Fraction>("framerate").ok();
+                    if rate.is_none_or(|r| r.numer() == 0 || r > cap) {
+                        structure.set("framerate", cap);
+                    }
                 }
             }
             *event = gst::event::Caps::builder(&caps).build();
@@ -1019,7 +1024,7 @@ mod tests {
             .unwrap()
             .get::<gst::Fraction>("framerate")
             .unwrap();
-        assert_eq!(framerate, gst::Fraction::new(60, 1));
+        assert_eq!(framerate, gst::Fraction::new(30, 1));
     }
 
     /// Regression for the KDE capture failure: `capssetter` answers upstream
