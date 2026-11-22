@@ -224,10 +224,10 @@ fn add_node(
             pid
         }
     };
-    let env = if pid.is_empty() {
-        String::new()
-    } else {
+    let env = if !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()) {
         env_of(&pid)
+    } else {
+        String::new()
     };
     let Some(category) = classify(&props, &env, own_pid) else {
         return;
