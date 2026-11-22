@@ -60,7 +60,7 @@ jobs:
           chmod +x "$appdir/AppRun"
           ARCH=x86_64 /tmp/appimagetool --appimage-extract-and-run \
             "$appdir" dist/clip-recorder-x86_64.AppImage
-          sha256sum dist/clip-recorder-x86_64.AppImage > dist/clip-recorder-x86_64.AppImage.sha256
+          (cd dist && sha256sum clip-recorder-x86_64.AppImage > clip-recorder-x86_64.AppImage.sha256)
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}

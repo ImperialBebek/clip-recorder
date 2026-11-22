@@ -80,8 +80,13 @@ pub fn watch(on_event: impl Fn(StreamEvent) + Send + 'static) -> Result<Watcher>
     let thread = std::thread::spawn({
         let alive = alive.clone();
         move || {
-            let mut seen = HashMap::new();
+            let mut seen = Seen::default();
             let own_pid = std::process::id();
+            let env_of = |pid: &str| {
+                std::fs::read(format!("/proc/{pid}/environ"))
+                    .map(|raw| String::from_utf8_lossy(&raw).into_owned())
+                    .unwrap_or_default()
+            };
             let reader = BufReader::new(stdout);
             for dump in
                 serde_json::Deserializer::from_reader(reader).into_iter::<Vec<Value>>()
@@ -91,7 +96,7 @@ pub fn watch(on_event: impl Fn(StreamEvent) + Send + 'static) -> Result<Watcher>
                 }
                 let Ok(dump) = dump else { break };
                 for obj in &dump {
-                    handle_object(obj, &mut seen, own_pid, &on_event);
+                    handle_object(obj, &mut seen, own_pid, &env_of, &on_event);
                 }
             }
         }
@@ -103,12 +108,38 @@ pub fn watch(on_event: impl Fn(StreamEvent) + Send + 'static) -> Result<Watcher>
     })
 }
 
-/// One dump entry: `info: null` removes a tracked node; a node whose props we
-/// see for the first time is classified and, for an app audio stream, added.
+/// What the monitor thread knows about the objects it has seen so far.
+#[derive(Default)]
+struct Seen {
+    /// Streams already reported with `StreamEvent::Added`, by node id.
+    streams: HashMap<u32, AppStream>,
+    /// Client objects' props, by client id; updated on every re-report.
+    clients: HashMap<u32, serde_json::Map<String, Value>>,
+    /// Audio nodes parked until their client object shows up, by client id.
+    pending: HashMap<u32, Vec<u32>>,
+    /// Props of the parked nodes, by node id.
+    nodes: HashMap<u32, serde_json::Map<String, Value>>,
+}
+
+/// A prop value as a string; PipeWire reports numbers for ids and serials.
+fn prop(props: &serde_json::Map<String, Value>, key: &str) -> String {
+    match props.get(key) {
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => other.to_string(),
+        None => String::new(),
+    }
+}
+
+/// One dump entry: `info: null` removes a tracked object; a node whose props
+/// we see for the first time is classified and, for an app audio stream,
+/// added. Nodes carry no process info under Proton's native PipeWire driver;
+/// it lives on their Client object, so a node's effective props are its
+/// client's overlaid with its own (the node wins on conflicts).
 fn handle_object(
     obj: &Value,
-    seen: &mut HashMap<u32, AppStream>,
+    seen: &mut Seen,
     own_pid: u32,
+    env_of: &impl Fn(&str) -> String,
     on_event: &impl Fn(StreamEvent),
 ) {
     let Some(id) = obj.get("id").and_then(|v| v.as_u64()).map(|v| v as u32) else {
@@ -116,55 +147,119 @@ fn handle_object(
     };
     let info = obj.get("info");
     if info.is_none() || info.is_some_and(|v| v.is_null()) {
-        if seen.remove(&id).is_some() {
+        if seen.streams.remove(&id).is_some() {
             on_event(StreamEvent::Removed(id));
+        }
+        seen.clients.remove(&id);
+        seen.nodes.remove(&id);
+        for nodes in seen.pending.values_mut() {
+            nodes.retain(|n| *n != id);
         }
         return;
     }
-    if seen.contains_key(&id) {
-        return;
+    match obj.get("type").and_then(|v| v.as_str()) {
+        Some("PipeWire:Interface:Client") => {
+            let Some(props) = info.unwrap()["props"].as_object().cloned() else {
+                return;
+            };
+            seen.clients.insert(id, props);
+            // Nodes parked for this client can be classified now.
+            let Some(pending) = seen.pending.remove(&id) else {
+                return;
+            };
+            for node_id in pending {
+                let Some(props) = seen.nodes.remove(&node_id) else {
+                    continue;
+                };
+                add_node(node_id, &props, seen, own_pid, env_of, on_event);
+            }
+        }
+        Some("PipeWire:Interface:Node") => {
+            if seen.streams.contains_key(&id) {
+                return;
+            }
+            let Some(props) = info.unwrap()["props"].as_object() else {
+                return;
+            };
+            if prop(props, "media.class") != "Stream/Output/Audio" {
+                return;
+            }
+            let client = prop(props, "client.id").parse::<u32>().unwrap_or(0);
+            if client != 0 && !seen.clients.contains_key(&client) {
+                if !seen.nodes.contains_key(&id) {
+                    seen.pending.entry(client).or_default().push(id);
+                }
+                seen.nodes.insert(id, props.clone());
+                return;
+            }
+            seen.nodes.remove(&id);
+            for nodes in seen.pending.values_mut() {
+                nodes.retain(|n| *n != id);
+            }
+            add_node(id, props, seen, own_pid, env_of, on_event);
+        }
+        _ => {}
     }
-    if obj.get("type").and_then(|v| v.as_str()) != Some("PipeWire:Interface:Node") {
-        return;
+}
+
+/// Classifies one app audio node and emits `StreamEvent::Added` for it.
+fn add_node(
+    id: u32,
+    node_props: &serde_json::Map<String, Value>,
+    seen: &mut Seen,
+    own_pid: u32,
+    env_of: &impl Fn(&str) -> String,
+    on_event: &impl Fn(StreamEvent),
+) {
+    let client = prop(node_props, "client.id").parse::<u32>().unwrap_or(0);
+    let mut props = seen.clients.get(&client).cloned().unwrap_or_default();
+    for (k, v) in node_props {
+        props.insert(k.clone(), v.clone());
     }
-    let props = &info.unwrap()["props"];
-    let Some(props) = props.as_object() else { return };
-    if props
-        .get("media.class")
-        .and_then(|v| v.as_str())
-        != Some("Stream/Output/Audio")
-    {
-        return;
-    }
-    let env = props
-        .get("application.process.id")
-        .and_then(|v| v.as_str())
-        .and_then(|pid| std::fs::read(format!("/proc/{pid}/environ")).ok())
-        .map(|raw| String::from_utf8_lossy(&raw).into_owned())
-        .unwrap_or_default();
-    let Some(category) = classify(props, &env, own_pid) else {
+    let pid = {
+        let pid = prop(&props, "application.process.id");
+        if pid.is_empty() {
+            prop(&props, "pipewire.sec.pid")
+        } else {
+            pid
+        }
+    };
+    let env = if pid.is_empty() {
+        String::new()
+    } else {
+        env_of(&pid)
+    };
+    let Some(category) = classify(&props, &env, own_pid) else {
         return;
     };
-    let serial = props
-        .get("object.serial")
-        .map(|v| match v {
-            Value::String(s) => s.clone(),
-            other => other.to_string(),
-        })
-        .unwrap_or_else(|| id.to_string());
-    let name = props
-        .get("application.name")
-        .or_else(|| props.get("application.process.binary"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("app")
-        .to_string();
+    let serial = {
+        let serial = prop(&props, "object.serial");
+        if serial.is_empty() {
+            id.to_string()
+        } else {
+            serial
+        }
+    };
+    let name = {
+        let name = prop(&props, "application.name");
+        if name.is_empty() {
+            let binary = prop(&props, "application.process.binary");
+            if binary.is_empty() {
+                "app".into()
+            } else {
+                binary
+            }
+        } else {
+            name
+        }
+    };
     let stream = AppStream {
         id,
         serial,
         name,
         category,
     };
-    seen.insert(id, stream.clone());
+    seen.streams.insert(id, stream.clone());
     on_event(StreamEvent::Added(stream));
 }
 
@@ -175,13 +270,18 @@ fn classify(
     env: &str,
     own_pid: u32,
 ) -> Option<Category> {
-    let get = |key: &str| props.get(key).and_then(|v| v.as_str()).unwrap_or("");
-    if get("application.process.id").parse::<u32>().ok() == Some(own_pid) {
+    let pid = prop(props, "application.process.id");
+    let pid = if pid.is_empty() {
+        prop(props, "pipewire.sec.pid")
+    } else {
+        pid
+    };
+    if pid.parse::<u32>().ok() == Some(own_pid) {
         return None;
     }
-    let binary = get("application.process.binary");
+    let binary = prop(props, "application.process.binary");
     let binary_l = binary.to_lowercase();
-    let app = get("application.name");
+    let app = prop(props, "application.name");
     let app_l = app.to_lowercase();
     if binary_l == "clip-recorder" || app_l == "clip-recorder" {
         return None;
@@ -286,7 +386,6 @@ mod tests {
     fn parses_monitor_stream() {
         let events = Mutex::new(Vec::new());
         let emit = |ev: StreamEvent| events.lock().unwrap().push(ev);
-        let mut seen = HashMap::new();
         let add = json!({
             "id": 55, "type": "PipeWire:Interface:Node",
             "info": {"props": {
@@ -297,15 +396,17 @@ mod tests {
                 "object.serial": "1234",
             }},
         });
-        handle_object(&add, &mut seen, 1, &emit);
+        let mut seen = Seen::default();
+        let no_env = |_: &str| String::new();
+        handle_object(&add, &mut seen, 1, &no_env, &emit);
         let update = json!({
             "id": 55, "type": "PipeWire:Interface:Node",
             "info": {"props": {"media.class": "Stream/Output/Audio"}},
         });
-        handle_object(&update, &mut seen, 1, &emit);
+        handle_object(&update, &mut seen, 1, &no_env, &emit);
         let remove = json!({"id": 55, "type": "PipeWire:Interface:Node", "info": null});
-        handle_object(&remove, &mut seen, 1, &emit);
-        handle_object(&remove, &mut seen, 1, &emit);
+        handle_object(&remove, &mut seen, 1, &no_env, &emit);
+        handle_object(&remove, &mut seen, 1, &no_env, &emit);
         let events = events.lock().unwrap();
         assert_eq!(events.len(), 2);
         let StreamEvent::Added(s) = &events[0] else {
@@ -314,5 +415,75 @@ mod tests {
         assert_eq!(s.serial, "1234");
         assert_eq!(s.category, Category::Other);
         assert!(matches!(events[1], StreamEvent::Removed(55)));
+    }
+
+    // Crimson Desert under Proton's native PipeWire driver: the node has no
+    // process props; they live on its Client object.
+    fn crimson_client() -> Value {
+        json!({
+            "id": 72, "type": "PipeWire:Interface:Client",
+            "info": {"props": {
+                "application.process.binary": "wine64-preloader",
+                "application.process.id": "199350",
+                "pipewire.sec.pid": 199350,
+                "application.name": "Crimson Desert",
+            }},
+        })
+    }
+
+    fn crimson_node() -> Value {
+        json!({
+            "id": 73, "type": "PipeWire:Interface:Node",
+            "info": {"props": {
+                "media.class": "Stream/Output/Audio",
+                "application.name": "Crimson Desert",
+                "client.id": "72",
+                "object.serial": 900,
+            }},
+        })
+    }
+
+    fn steam_env(pid: &str) -> String {
+        if pid == "199350" {
+            "SteamAppId=3321460\0".into()
+        } else {
+            String::new()
+        }
+    }
+
+    #[test]
+    fn classifies_node_through_its_client() {
+        for swap in [false, true] {
+            let events = Mutex::new(Vec::new());
+            let emit = |ev: StreamEvent| events.lock().unwrap().push(ev);
+            let mut seen = Seen::default();
+            let (client, node) = (crimson_client(), crimson_node());
+            if swap {
+                handle_object(&node, &mut seen, 1, &steam_env, &emit);
+                handle_object(&client, &mut seen, 1, &steam_env, &emit);
+            } else {
+                handle_object(&client, &mut seen, 1, &steam_env, &emit);
+                handle_object(&node, &mut seen, 1, &steam_env, &emit);
+            }
+            let events = events.lock().unwrap();
+            assert_eq!(events.len(), 1, "swap={swap}");
+            let StreamEvent::Added(s) = &events[0] else {
+                panic!("expected Added");
+            };
+            assert_eq!(s.category, Category::Game);
+            assert_eq!(s.name, "Crimson Desert");
+            assert_eq!(s.serial, "900");
+        }
+    }
+
+    #[test]
+    fn pending_node_is_dropped_with_its_client() {
+        let events = Mutex::new(Vec::new());
+        let emit = |ev: StreamEvent| events.lock().unwrap().push(ev);
+        let mut seen = Seen::default();
+        handle_object(&crimson_node(), &mut seen, 1, &steam_env, &emit);
+        let gone = json!({"id": 72, "type": "PipeWire:Interface:Client", "info": null});
+        handle_object(&gone, &mut seen, 1, &steam_env, &emit);
+        assert!(events.lock().unwrap().is_empty());
     }
 }
