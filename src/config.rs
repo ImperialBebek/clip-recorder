@@ -18,9 +18,9 @@ pub enum Quality {
 impl Quality {
     pub fn kbps(self) -> u32 {
         match self {
-            Quality::Light => 12_000,
-            Quality::High => 25_000,
-            Quality::Max => 50_000,
+            Quality::Light => 8_000,
+            Quality::High => 12_000,
+            Quality::Max => 20_000,
         }
     }
     pub fn name(self) -> &'static str {

@@ -64,6 +64,7 @@ impl Encoder {
     /// Elements from raw frames to H.264 access units, colour conversion included.
     /// Hardware paths convert on the GPU so DMA-BUF frames never touch the CPU.
     pub fn elements(self, kbps: u32, gop: u32) -> Result<Vec<gst::Element>> {
+        let va_kbps = va_bitrate(kbps, &va_vendor()).to_string();
         let kbps = kbps.to_string();
         let gop = gop.to_string();
         Ok(match self {
@@ -80,7 +81,8 @@ impl Encoder {
                         enc,
                         &[
                             ("rate-control", "cbr"),
-                            ("bitrate", &kbps),
+                            ("bitrate", &va_kbps),
+                            ("cpb-size", &va_kbps),
                             ("key-int-max", &gop),
                             ("b-frames", "0"),
                             ("target-usage", "7"),
@@ -148,5 +150,35 @@ impl Encoder {
                 )?,
             ],
         })
+    }
+}
+
+/// PCI vendor id of the GPU behind `vah264enc` (the first render node), e.g. "0x1002" for AMD.
+fn va_vendor() -> String {
+    std::fs::read_to_string("/sys/class/drm/renderD128/device/vendor")
+        .map(|v| v.trim().to_owned())
+        .unwrap_or_default()
+}
+
+/// The bitrate to ask the VA encoder for so clips come out at `kbps`: AMD's
+/// CBR writes about 20% over its target on game footage (measured 14.4 Mb/s
+/// for 12 Mb/s), so it is asked for 5/6 of the target.
+fn va_bitrate(kbps: u32, vendor: &str) -> u32 {
+    if vendor == "0x1002" {
+        kbps * 5 / 6
+    } else {
+        kbps
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn calibrates_amd_va_bitrate() {
+        assert_eq!(va_bitrate(12_000, "0x1002"), 10_000);
+        assert_eq!(va_bitrate(12_000, "0x8086"), 12_000);
+        assert_eq!(va_bitrate(12_000, ""), 12_000);
     }
 }

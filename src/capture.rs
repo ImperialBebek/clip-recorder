@@ -573,6 +573,79 @@ fn appsink(
     (sink.upcast(), rx)
 }
 
+/// Caps the frame rate without touching frame memory (works on DMA-BUF):
+/// `videorate max-rate` doesn't engage on variable-rate (`framerate=0/1`)
+/// input and older GStreamer can't renegotiate it, so a pad probe drops
+/// frames above the cap by timestamp while a second probe rewrites a variable
+/// or faster caps rate to a fixed `{fps}/1` so CBR stays honest (a slower
+/// fixed rate is left as is). `identity` is used rather
+/// than `capssetter`, which answers upstream caps queries with ANY and would
+/// strip the DMA-BUF constraints pipewiresrc negotiates against.
+fn rate_cap(fps: u32) -> Result<Vec<gst::Element>> {
+    let ident = make("identity", &[("silent", "true")])?;
+    let interval = gst::ClockTime::SECOND / u64::from(fps);
+    let next_due = Mutex::new(None);
+    ident
+        .static_pad("sink")
+        .unwrap()
+        .add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
+            let mut next_due = next_due.lock().unwrap();
+            match info.buffer().and_then(|buf| buf.pts()) {
+                Some(pts) if keep_frame(&mut next_due, pts, interval) => {
+                    gst::PadProbeReturn::Ok
+                }
+                Some(_) => gst::PadProbeReturn::Drop,
+                None => gst::PadProbeReturn::Ok,
+            }
+        });
+    ident
+        .static_pad("src")
+        .unwrap()
+        .add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
+            let Some(gst::PadProbeData::Event(event)) = info.data.as_mut() else {
+                return gst::PadProbeReturn::Ok;
+            };
+            let gst::EventView::Caps(caps_event) = event.view() else {
+                return gst::PadProbeReturn::Ok;
+            };
+            let mut caps = caps_event.caps().to_owned();
+            let cap = gst::Fraction::new(fps as i32, 1);
+            for i in 0..caps.size() {
+                if let Some(structure) = caps.make_mut().structure_mut(i) {
+                    let rate = structure.get::<gst::Fraction>("framerate").ok();
+                    if rate.is_none_or(|r| r.numer() == 0 || r > cap) {
+                        structure.set("framerate", cap);
+                    }
+                }
+            }
+            *event = gst::event::Caps::builder(&caps).build();
+            gst::PadProbeReturn::Ok
+        });
+    Ok(vec![ident])
+}
+
+/// Whether a frame at `pts` fits the `interval` cadence; tolerates jitter up
+/// to half an interval and resynchronizes after a gap of more than one.
+fn keep_frame(
+    next_due: &mut Option<gst::ClockTime>,
+    pts: gst::ClockTime,
+    interval: gst::ClockTime,
+) -> bool {
+    let Some(due) = *next_due else {
+        *next_due = Some(pts + interval);
+        return true;
+    };
+    if pts + interval / 2 < due {
+        return false;
+    }
+    *next_due = Some(if due + interval < pts {
+        pts + interval
+    } else {
+        due + interval
+    });
+    true
+}
+
 fn build_video(
     source: &VideoSource,
     s: &Settings,
@@ -590,11 +663,7 @@ fn build_video(
             ))?,
         ],
     };
-    // Caps the frame rate without touching frame memory (works on DMA-BUF).
-    chain.push(make(
-        "videorate",
-        &[("drop-only", "true"), ("max-rate", &fps)],
-    )?);
+    chain.extend(rate_cap(s.fps.max(1))?);
     chain.extend(enc.elements(s.kbps, s.fps.max(1))?);
     chain.push(make("h264parse", &[("config-interval", "-1")])?);
     chain.push(capsfilter("video/x-h264,stream-format=avc,alignment=au")?);
@@ -841,5 +910,225 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
+    }
+
+    /// The pad probe drops frames above the cap on `framerate=0/1` input
+    /// (what KWin's game capture negotiates) without ever duplicating one,
+    /// and `capssetter` fixes the output caps at the configured rate.
+    #[test]
+    fn rate_cap_limits_variable_rate_input() {
+        gst::init().unwrap();
+        for (in_fps, lo, hi) in [(120u32, 115usize, 125usize), (40, 78, 82)] {
+            let pipeline = gst::Pipeline::new();
+            let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let caps_seen = Arc::new(Mutex::new(None));
+            let mut chain = vec![
+                make(
+                    "videotestsrc",
+                    &[
+                        ("is-live", "true"),
+                        ("num-buffers", &(in_fps * 2).to_string()),
+                        ("pattern", "ball"),
+                    ],
+                )
+                .unwrap(),
+                capsfilter(&format!(
+                    "video/x-raw,width=320,height=180,framerate={in_fps}/1"
+                ))
+                .unwrap(),
+            ];
+            let setter = make("capssetter", &[("join", "true")]).unwrap();
+            setter.set_property(
+                "caps",
+                gst::Caps::builder("video/x-raw")
+                    .field("framerate", gst::Fraction::new(0, 1))
+                    .build(),
+            );
+            chain.push(setter);
+            chain.extend(rate_cap(60).unwrap());
+            let (sink, _rx) = appsink({
+                let count = count.clone();
+                let caps_seen = caps_seen.clone();
+                move |caps, _| {
+                    if let Some(caps) = caps {
+                        *caps_seen.lock().unwrap() = Some(caps);
+                    }
+                    count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+            chain.push(sink);
+            add_chain(&pipeline, &chain).unwrap();
+            pipeline.set_state(gst::State::Playing).unwrap();
+            let eos = pipeline
+                .bus()
+                .unwrap()
+                .timed_pop_filtered(
+                    gst::ClockTime::from_seconds(10),
+                    &[gst::MessageType::Eos, gst::MessageType::Error],
+                )
+                .expect("no EOS within 10 s");
+            assert!(matches!(eos.view(), gst::MessageView::Eos(_)));
+            pipeline.set_state(gst::State::Null).unwrap();
+            let n = count.load(std::sync::atomic::Ordering::Relaxed);
+            assert!((lo..=hi).contains(&n), "{in_fps} fps in -> {n} out");
+            let caps = caps_seen.lock().unwrap().clone().unwrap();
+            let framerate = caps
+                .structure(0)
+                .unwrap()
+                .get::<gst::Fraction>("framerate")
+                .unwrap();
+            assert_eq!(framerate, gst::Fraction::new(60, 1));
+        }
+    }
+
+    /// A fixed source slower than the cap passes untouched; the output caps
+    /// still say `{fps}/1` (capssetter only relabels the rate).
+    #[test]
+    fn rate_cap_passes_slower_fixed_rate() {
+        gst::init().unwrap();
+        let pipeline = gst::Pipeline::new();
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let caps_seen = Arc::new(Mutex::new(None));
+        let mut chain = vec![
+            make("videotestsrc", &[("is-live", "true"), ("num-buffers", "60")]).unwrap(),
+            capsfilter("video/x-raw,width=320,height=180,framerate=30/1").unwrap(),
+        ];
+        chain.extend(rate_cap(60).unwrap());
+        let (sink, _rx) = appsink({
+            let count = count.clone();
+            let caps_seen = caps_seen.clone();
+            move |caps, _| {
+                if let Some(caps) = caps {
+                    *caps_seen.lock().unwrap() = Some(caps);
+                }
+                count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+        chain.push(sink);
+        add_chain(&pipeline, &chain).unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let msg = pipeline
+            .bus()
+            .unwrap()
+            .timed_pop_filtered(
+                gst::ClockTime::from_seconds(10),
+                &[gst::MessageType::Eos, gst::MessageType::Error],
+            )
+            .expect("no EOS within 10 s");
+        pipeline.set_state(gst::State::Null).unwrap();
+        assert!(matches!(msg.view(), gst::MessageView::Eos(_)), "{msg:?}");
+        assert_eq!(count.load(std::sync::atomic::Ordering::Relaxed), 60);
+        let caps = caps_seen.lock().unwrap().clone().unwrap();
+        let framerate = caps
+            .structure(0)
+            .unwrap()
+            .get::<gst::Fraction>("framerate")
+            .unwrap();
+        assert_eq!(framerate, gst::Fraction::new(30, 1));
+    }
+
+    /// Regression for the KDE capture failure: `capssetter` answers upstream
+    /// caps queries with ANY, which stripped the DMA-BUF constraints
+    /// pipewiresrc negotiates against. `identity` must let downstream
+    /// constraints propagate upstream untouched.
+    #[test]
+    fn rate_cap_passes_caps_queries_through() {
+        gst::init().unwrap();
+        let pipeline = gst::Pipeline::new();
+        let cap = rate_cap(60).unwrap();
+        let filter = capsfilter("video/x-raw,format=NV12,width=320,height=180").unwrap();
+        let sink = make("fakesink", &[]).unwrap();
+        add_chain(&pipeline, &[cap[0].clone(), filter, sink]).unwrap();
+        let caps = cap[0].static_pad("sink").unwrap().query_caps(None);
+        assert!(!caps.is_any());
+        for i in 0..caps.size() {
+            let structure = caps.structure(i).unwrap();
+            assert_eq!(structure.get::<&str>("format").unwrap(), "NV12");
+        }
+    }
+
+    /// `capssetter join=true` merges the framerate into the negotiated caps
+    /// without forcing system memory: GLMemory buffers and their feature
+    /// reach the sink untouched.
+    #[test]
+    #[ignore = "needs a GL context; run manually"]
+    fn rate_cap_keeps_memory_features() {
+        gst::init().unwrap();
+        let pipeline = gst::Pipeline::new();
+        let caps_seen = Arc::new(Mutex::new(None));
+        let mut chain = vec![
+            make("videotestsrc", &[("num-buffers", "240"), ("is-live", "true")])
+                .unwrap(),
+            make("glupload", &[]).unwrap(),
+            capsfilter("video/x-raw(memory:GLMemory),framerate=120/1").unwrap(),
+        ];
+        // Same variable-rate input the screen capture negotiates.
+        let setter = make("capssetter", &[("join", "true")]).unwrap();
+        setter.set_property(
+            "caps",
+            gst::Caps::builder("video/x-raw")
+                .field("framerate", gst::Fraction::new(0, 1))
+                .build(),
+        );
+        chain.push(setter);
+        chain.extend(rate_cap(60).unwrap());
+        let (sink, _rx) = appsink({
+            let caps_seen = caps_seen.clone();
+            move |caps, _| {
+                if let Some(caps) = caps {
+                    *caps_seen.lock().unwrap() = Some(caps);
+                }
+            }
+        });
+        chain.push(sink);
+        add_chain(&pipeline, &chain).unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let eos = pipeline
+            .bus()
+            .unwrap()
+            .timed_pop_filtered(
+                gst::ClockTime::from_seconds(10),
+                &[gst::MessageType::Eos, gst::MessageType::Error],
+            )
+            .expect("no EOS within 10 s");
+        assert!(
+            matches!(eos.view(), gst::MessageView::Eos(_)),
+            "not negotiated: {eos:?}"
+        );
+        pipeline.set_state(gst::State::Null).unwrap();
+        let caps = caps_seen.lock().unwrap().clone().unwrap().to_string();
+        assert!(
+            caps.contains("memory:GLMemory") && caps.contains("framerate=(fraction)60/1"),
+            "unexpected caps: {caps}"
+        );
+    }
+
+    #[test]
+    fn keeps_cadence_and_drops_above_cap() {
+        let interval = gst::ClockTime::SECOND / 60;
+        let run = |pts: &[u64]| {
+            let mut next_due = None;
+            pts.iter()
+                .filter(|&&p| {
+                    keep_frame(&mut next_due, gst::ClockTime::from_nseconds(p), interval)
+                })
+                .count()
+        };
+        let spaced = |fps: u64| {
+            (0..fps)
+                .map(|i| i * 1_000_000_000 / fps)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(run(&spaced(60)), 60);
+        assert_eq!(run(&spaced(40)), 40);
+        assert!((59..=61).contains(&run(&spaced(180))));
+        // 108 fps with ±2 ms deterministic jitter.
+        let jittered = (0..108u64)
+            .map(|i| {
+                let offset = ((i * 37) % 5) * 1_000_000;
+                i * 1_000_000_000 / 108 + 2_000_000 - offset
+            })
+            .collect::<Vec<_>>();
+        assert!((58..=61).contains(&run(&jittered)));
     }
 }
