@@ -81,6 +81,7 @@ impl Encoder {
                         &[
                             ("rate-control", "cbr"),
                             ("bitrate", &kbps),
+                            ("cpb-size", &kbps),
                             ("key-int-max", &gop),
                             ("b-frames", "0"),
                             ("target-usage", "7"),
