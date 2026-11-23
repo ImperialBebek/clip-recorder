@@ -465,7 +465,16 @@ fn export_trimmed(
         keys
     };
     let start = crate::trim::snap_start(&keys, tin);
-    crate::trim::export(src, start, tout, mix, out)
+    // Written under a hidden, non-.mp4 name and renamed when complete, so an
+    // export cut short (library closed, error) never shows up as a clip.
+    let name = out.file_name().unwrap_or_default().to_string_lossy();
+    let part = out.with_file_name(format!(".{name}.part"));
+    let result = crate::trim::export(src, start, tout, mix, &part)
+        .and_then(|()| Ok(std::fs::rename(&part, out)?));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&part);
+    }
+    result
 }
 
 /// Seconds as `m:ss`.
