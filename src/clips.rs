@@ -54,6 +54,32 @@ pub fn unique_path(dir: &Path, name: &str) -> PathBuf {
     path
 }
 
+/// Moves the finished file `tmp` to `path`, or to the next free `-N` name if
+/// something took `path` meanwhile (e.g. a clip restored from the Trash). A
+/// hard link never replaces an existing file, unlike `rename`.
+pub fn publish(tmp: &Path, path: &Path) -> std::io::Result<PathBuf> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let mut dest = path.to_path_buf();
+    loop {
+        match std::fs::hard_link(tmp, &dest) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(tmp);
+                return Ok(dest);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                dest = unique_path(dir, &name);
+            }
+            // Filesystems without hard links (FAT, some FUSE mounts).
+            Err(_) if !dest.exists() => {
+                std::fs::rename(tmp, &dest)?;
+                return Ok(dest);
+            }
+            Err(_) => dest = unique_path(dir, &name),
+        }
+    }
+}
+
 /// (grouping slug, is-a-trim-export) from a clip stem: the slug is
 /// everything before the `_YYYY-MM-DD` segment, and a `_trim`/`_trim-N`
 /// segment after the timestamp marks an exported clip.
@@ -346,5 +372,21 @@ mod tests {
         assert_eq!(game_of("My_Clip_trim"), ("My_Clip".to_owned(), true));
         assert_eq!(game_of("My_Clip_trim-3"), ("My_Clip".to_owned(), true));
         assert_eq!(game_of("trim"), ("trim".to_owned(), false));
+    }
+
+    #[test]
+    fn publish_never_replaces() {
+        let dir = std::env::temp_dir().join(format!("clip-publish-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = dir.join(".a.mp4.part");
+        let taken = dir.join("a.mp4");
+        std::fs::write(&taken, b"restored").unwrap();
+        std::fs::write(&tmp, b"export").unwrap();
+        let out = publish(&tmp, &taken).unwrap();
+        assert_eq!(out, dir.join("a-2.mp4"));
+        assert_eq!(std::fs::read(&taken).unwrap(), b"restored");
+        assert_eq!(std::fs::read(&out).unwrap(), b"export");
+        assert!(!tmp.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

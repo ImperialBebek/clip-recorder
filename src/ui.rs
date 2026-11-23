@@ -470,7 +470,7 @@ fn export_trimmed(
     let name = out.file_name().unwrap_or_default().to_string_lossy();
     let part = out.with_file_name(format!(".{name}.part"));
     let result = crate::trim::export(src, start, tout, mix, &part)
-        .and_then(|()| Ok(std::fs::rename(&part, out)?));
+        .and_then(|()| Ok(clips::publish(&part, out).map(drop)?));
     if result.is_err() {
         let _ = std::fs::remove_file(&part);
     }
