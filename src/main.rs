@@ -118,9 +118,7 @@ fn parse_args() -> Result<Cmd> {
             Short('a') | Long("audio") => {
                 cfg.audio = AudioSource::parse(&parser.value()?.string()?)?
             }
-            Short('m') | Long("mic") => {
-                cfg.mic = AudioSource::parse(&parser.value()?.string()?)?
-            }
+            Short('m') | Long("mic") => cfg.mic = AudioSource::parse(&parser.value()?.string()?)?,
             Long("mic-device") => cfg.mic_device = parser.value()?.string()?,
             Short('o') | Long("output") => cfg.output = parser.value()?.into(),
             Short('k') | Long("hotkey") => cfg.hotkey = parser.value()?.string()?,

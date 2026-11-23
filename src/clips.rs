@@ -60,7 +60,9 @@ pub fn unique_path(dir: &Path, name: &str) -> PathBuf {
 fn game_of(stem: &str) -> (String, bool) {
     let parts: Vec<&str> = stem.split('_').collect();
     let is_trim = |p: &str| {
-        p == "trim" || p.strip_prefix("trim-").is_some_and(|n| n.parse::<u32>().is_ok())
+        p == "trim"
+            || p.strip_prefix("trim-")
+                .is_some_and(|n| n.parse::<u32>().is_ok())
     };
     let Some(i) = date_pos(&parts) else {
         // A clip renamed without its timestamp still gets `_trim` on export.

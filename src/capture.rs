@@ -264,7 +264,11 @@ impl Recorder {
         }
 
         let mut mic = None;
-        let mic_idx = if want_mic { titles.len() - 1 } else { usize::MAX };
+        let mic_idx = if want_mic {
+            titles.len() - 1
+        } else {
+            usize::MAX
+        };
         for &src in platform::audio_candidates(settings.mic) {
             let attempt = build_mic(src, settings.mic_device.as_deref(), mic_idx, ring.clone())
                 .and_then(|(p, first)| start_checked(&p, &clock, base, first).map(|_| p));
@@ -287,7 +291,13 @@ impl Recorder {
             encoder,
             audio_name,
             mic_name: mic.as_ref().map(|(_, n)| *n),
-            tracks: ring.lock().unwrap().aux.iter().map(|(t, _)| t.clone()).collect(),
+            tracks: ring
+                .lock()
+                .unwrap()
+                .aux
+                .iter()
+                .map(|(t, _)| t.clone())
+                .collect(),
             audio,
             mic: mic.map(|(p, _)| p),
             cats,
@@ -389,8 +399,8 @@ fn add_branch(shared: &Arc<Mutex<CategoryShared>>, stream: &AppStream) {
     let build = || -> Result<(gst::Bin, gst::Pad, gst::Pad)> {
         // Never open an untargeted pipewiresrc: it would record the default
         // source (even the microphone) instead of this app's stream.
-        let prop = platform::pw_target_prop()
-            .context("pipewiresrc cannot target a single app stream")?;
+        let prop =
+            platform::pw_target_prop().context("pipewiresrc cannot target a single app stream")?;
         let target = if prop == "target-object" {
             stream.serial.clone()
         } else {
@@ -446,7 +456,11 @@ fn add_branch(shared: &Arc<Mutex<CategoryShared>>, stream: &AppStream) {
                 stream.id
             );
         }
-        Err(e) => eprintln!("{} stream {} failed to add: {e:#}", stream.category.name(), stream.name),
+        Err(e) => eprintln!(
+            "{} stream {} failed to add: {e:#}",
+            stream.category.name(),
+            stream.name
+        ),
     }
 }
 
@@ -518,11 +532,7 @@ fn watch_cat_bus(
 fn branch_of(msg: &gst::Message) -> Option<u32> {
     let mut parent = msg.src()?.downcast_ref::<gst::Element>()?.parent();
     while let Some(obj) = parent {
-        if let Some(id) = obj
-            .name()
-            .strip_prefix("app-")
-            .and_then(|n| n.parse().ok())
-        {
+        if let Some(id) = obj.name().strip_prefix("app-").and_then(|n| n.parse().ok()) {
             return Some(id);
         }
         parent = obj.parent();
@@ -591,17 +601,14 @@ fn rate_cap(fps: u32) -> Result<Vec<gst::Element>> {
         .add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
             let mut next_due = next_due.lock().unwrap();
             match info.buffer().and_then(|buf| buf.pts()) {
-                Some(pts) if keep_frame(&mut next_due, pts, interval) => {
-                    gst::PadProbeReturn::Ok
-                }
+                Some(pts) if keep_frame(&mut next_due, pts, interval) => gst::PadProbeReturn::Ok,
                 Some(_) => gst::PadProbeReturn::Drop,
                 None => gst::PadProbeReturn::Ok,
             }
         });
-    ident
-        .static_pad("src")
-        .unwrap()
-        .add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
+    ident.static_pad("src").unwrap().add_probe(
+        gst::PadProbeType::EVENT_DOWNSTREAM,
+        move |_pad, info| {
             let Some(gst::PadProbeData::Event(event)) = info.data.as_mut() else {
                 return gst::PadProbeReturn::Ok;
             };
@@ -620,7 +627,8 @@ fn rate_cap(fps: u32) -> Result<Vec<gst::Element>> {
             }
             *event = gst::event::Caps::builder(&caps).build();
             gst::PadProbeReturn::Ok
-        });
+        },
+    );
     Ok(vec![ident])
 }
 
@@ -687,8 +695,7 @@ fn build_audio(
         capsfilter("audio/x-raw,rate=48000,channels=2")?,
     ];
     chain.extend(audio_encoder()?);
-    let (sink, first) =
-        appsink(move |caps, buf| ring.lock().unwrap().push_aux(aux, caps, buf));
+    let (sink, first) = appsink(move |caps, buf| ring.lock().unwrap().push_aux(aux, caps, buf));
     chain.push(sink);
     add_chain(&pipeline, &chain)?;
     Ok((pipeline, first))
@@ -710,8 +717,7 @@ fn build_mic(
         capsfilter("audio/x-raw,rate=48000,channels=2")?,
     ];
     chain.extend(audio_encoder()?);
-    let (sink, first) =
-        appsink(move |caps, buf| ring.lock().unwrap().push_aux(aux, caps, buf));
+    let (sink, first) = appsink(move |caps, buf| ring.lock().unwrap().push_aux(aux, caps, buf));
     chain.push(sink);
     add_chain(&pipeline, &chain)?;
     Ok((pipeline, first))
@@ -724,10 +730,7 @@ fn build_category(
     ring: Arc<Mutex<Ring>>,
 ) -> Result<(gst::Pipeline, gst::Element, mpsc::Receiver<()>)> {
     let pipeline = gst::Pipeline::with_name("category");
-    let silence = make(
-        "audiotestsrc",
-        &[("wave", "silence"), ("is-live", "true")],
-    )?;
+    let silence = make("audiotestsrc", &[("wave", "silence"), ("is-live", "true")])?;
     let mixer = make("audiomixer", &[])?;
     let mut chain = vec![
         mixer.clone(),
@@ -736,8 +739,7 @@ fn build_category(
         capsfilter("audio/x-raw,rate=48000,channels=2")?,
     ];
     chain.extend(audio_encoder()?);
-    let (sink, first) =
-        appsink(move |caps, buf| ring.lock().unwrap().push_aux(aux, caps, buf));
+    let (sink, first) = appsink(move |caps, buf| ring.lock().unwrap().push_aux(aux, caps, buf));
     chain.push(sink);
     pipeline.add(&silence)?;
     add_chain(&pipeline, &chain)?;
@@ -868,7 +870,11 @@ mod tests {
         assert_eq!(rec.tracks, ["Game", "Voice", "Other", "Mic"]);
         std::thread::sleep(Duration::from_secs(12));
         eprintln!("streams: {}", rec.stream_counts());
-        assert_ne!(rec.stream_counts(), "game:0 voice:0 other:0", "no app stream attached");
+        assert_ne!(
+            rec.stream_counts(),
+            "game:0 voice:0 other:0",
+            "no app stream attached"
+        );
         let snap = ring.lock().unwrap().snapshot();
         rec.stop();
         std::fs::create_dir_all("/tmp/clip-test").unwrap();
@@ -903,10 +909,7 @@ mod tests {
             drop(rec);
             let deadline = Instant::now() + Duration::from_secs(1);
             while weaks.iter().any(|w| w.upgrade().is_some()) {
-                assert!(
-                    Instant::now() < deadline,
-                    "pipeline outlived its Recorder"
-                );
+                assert!(Instant::now() < deadline, "pipeline outlived its Recorder");
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
@@ -990,7 +993,11 @@ mod tests {
         let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let caps_seen = Arc::new(Mutex::new(None));
         let mut chain = vec![
-            make("videotestsrc", &[("is-live", "true"), ("num-buffers", "60")]).unwrap(),
+            make(
+                "videotestsrc",
+                &[("is-live", "true"), ("num-buffers", "60")],
+            )
+            .unwrap(),
             capsfilter("video/x-raw,width=320,height=180,framerate=30/1").unwrap(),
         ];
         chain.extend(rate_cap(60).unwrap());
@@ -1057,8 +1064,11 @@ mod tests {
         let pipeline = gst::Pipeline::new();
         let caps_seen = Arc::new(Mutex::new(None));
         let mut chain = vec![
-            make("videotestsrc", &[("num-buffers", "240"), ("is-live", "true")])
-                .unwrap(),
+            make(
+                "videotestsrc",
+                &[("num-buffers", "240"), ("is-live", "true")],
+            )
+            .unwrap(),
             make("glupload", &[]).unwrap(),
             capsfilter("video/x-raw(memory:GLMemory),framerate=120/1").unwrap(),
         ];
@@ -1109,9 +1119,7 @@ mod tests {
         let run = |pts: &[u64]| {
             let mut next_due = None;
             pts.iter()
-                .filter(|&&p| {
-                    keep_frame(&mut next_due, gst::ClockTime::from_nseconds(p), interval)
-                })
+                .filter(|&&p| keep_frame(&mut next_due, gst::ClockTime::from_nseconds(p), interval))
                 .count()
         };
         let spaced = |fps: u64| {

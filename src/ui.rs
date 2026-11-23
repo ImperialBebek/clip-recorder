@@ -622,7 +622,9 @@ pub fn library() -> Result<()> {
                         if player_gen.load(Ordering::SeqCst) != gen {
                             return;
                         }
-                        let Some(buf) = latest.lock().unwrap().take() else { return };
+                        let Some(buf) = latest.lock().unwrap().take() else {
+                            return;
+                        };
                         if let Some(ui) = weak.upgrade() {
                             ui.set_frame(slint::Image::from_rgba8(buf));
                             shown_frame.store(true, Ordering::SeqCst);
@@ -687,10 +689,8 @@ pub fn library() -> Result<()> {
                                         return;
                                     }
                                     let Some(ui) = weak.upgrade() else { return };
-                                    let imgs: Vec<slint::Image> = frames
-                                        .into_iter()
-                                        .map(slint::Image::from_rgb8)
-                                        .collect();
+                                    let imgs: Vec<slint::Image> =
+                                        frames.into_iter().map(slint::Image::from_rgb8).collect();
                                     ui.set_filmstrip(ModelRc::new(VecModel::from(imgs)));
                                 });
                             }
@@ -749,13 +749,9 @@ pub fn library() -> Result<()> {
                     .into()
             }));
             ui.set_player_icon(card.as_ref().map(|c| c.icon.clone()).unwrap_or_default());
-            ui.set_player_initial(
-                card.as_ref().map(|c| c.initial.clone()).unwrap_or_default(),
-            );
+            ui.set_player_initial(card.as_ref().map(|c| c.initial.clone()).unwrap_or_default());
             ui.set_frame(slint::Image::default());
-            ui.set_filmstrip(ModelRc::new(VecModel::from(
-                Vec::<slint::Image>::new(),
-            )));
+            ui.set_filmstrip(ModelRc::new(VecModel::from(Vec::<slint::Image>::new())));
             ui.set_tracks(ModelRc::new(VecModel::from(vec![video_lane()])));
             ui.set_pos(0.0);
             ui.set_dur(0.0);
@@ -781,75 +777,64 @@ pub fn library() -> Result<()> {
                     }
                 });
             }
-            pos_timer.start(
-                TimerMode::Repeated,
-                Duration::from_millis(33),
-                {
-                    let weak = weak.clone();
-                    let player = player.clone();
-                    move || {
-                        let Some(ui) = weak.upgrade() else { return };
-                        let borrow = player.borrow();
-                        let Some(p) = borrow.as_ref() else { return };
-                        if let Some(d) = p.duration() {
-                            ui.set_dur(d.seconds_f64() as f32);
-                        }
-                        let dur = ui.get_dur();
-                        // The end of the clip is the default trim-out.
-                        if dur > 0.0 && ui.get_trim_out() <= 0.0 {
-                            ui.set_trim_out(dur);
-                        }
-                        let (tin, tout) = (ui.get_trim_in(), ui.get_trim_out());
-                        // The scrub position owns the playhead while the user
-                        // drags; a queued seek owns it right after release.
-                        let mut pos = if ui.get_scrubbing() {
-                            ui.get_scrub_pos()
-                        } else if p.seeking() {
-                            ui.get_pos()
-                        } else if p.ended() && dur > 0.0 {
-                            dur
-                        } else {
-                            let pos = p
-                                .position()
-                                .map_or(ui.get_pos(), |t| t.seconds_f64() as f32);
-                            let pos = if dur > 0.0 { pos.min(dur) } else { pos };
-                            ui.set_pos(pos);
-                            pos
-                        };
-                        // A trimmed range loops: at trim-out, jump back to
-                        // trim-in. Covering the whole clip keeps normal EOS.
-                        // With only trim-in moved, trim-out is the clip's end,
-                        // which arrives as EOS rather than while playing.
-                        let trimmed =
-                            tout > tin && (tout < dur - 0.05 || tin > 0.05);
-                        if trimmed
-                            && !ui.get_scrubbing()
-                            && (p.playing() || p.ended())
-                            && pos >= tout
-                        {
-                            p.seek(gst::ClockTime::from_seconds_f64(tin as f64));
-                            if !p.playing() {
-                                p.play();
-                            }
-                            pos = tin;
-                            ui.set_pos(pos);
-                        }
-                        ui.set_playing(p.playing());
-                        ui.set_player_time(
-                            format!("{} / {}", clock(pos), clock(dur)).into(),
-                        );
-                        ui.set_trim_label(
-                            format!(
-                                "{} – {} · {}s",
-                                clock(tin),
-                                clock(tout),
-                                (tout - tin).max(0.0).round() as u64
-                            )
-                            .into(),
-                        );
+            pos_timer.start(TimerMode::Repeated, Duration::from_millis(33), {
+                let weak = weak.clone();
+                let player = player.clone();
+                move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    let borrow = player.borrow();
+                    let Some(p) = borrow.as_ref() else { return };
+                    if let Some(d) = p.duration() {
+                        ui.set_dur(d.seconds_f64() as f32);
                     }
-                },
-            );
+                    let dur = ui.get_dur();
+                    // The end of the clip is the default trim-out.
+                    if dur > 0.0 && ui.get_trim_out() <= 0.0 {
+                        ui.set_trim_out(dur);
+                    }
+                    let (tin, tout) = (ui.get_trim_in(), ui.get_trim_out());
+                    // The scrub position owns the playhead while the user
+                    // drags; a queued seek owns it right after release.
+                    let mut pos = if ui.get_scrubbing() {
+                        ui.get_scrub_pos()
+                    } else if p.seeking() {
+                        ui.get_pos()
+                    } else if p.ended() && dur > 0.0 {
+                        dur
+                    } else {
+                        let pos = p
+                            .position()
+                            .map_or(ui.get_pos(), |t| t.seconds_f64() as f32);
+                        let pos = if dur > 0.0 { pos.min(dur) } else { pos };
+                        ui.set_pos(pos);
+                        pos
+                    };
+                    // A trimmed range loops: at trim-out, jump back to
+                    // trim-in. Covering the whole clip keeps normal EOS.
+                    // With only trim-in moved, trim-out is the clip's end,
+                    // which arrives as EOS rather than while playing.
+                    let trimmed = tout > tin && (tout < dur - 0.05 || tin > 0.05);
+                    if trimmed && !ui.get_scrubbing() && (p.playing() || p.ended()) && pos >= tout {
+                        p.seek(gst::ClockTime::from_seconds_f64(tin as f64));
+                        if !p.playing() {
+                            p.play();
+                        }
+                        pos = tin;
+                        ui.set_pos(pos);
+                    }
+                    ui.set_playing(p.playing());
+                    ui.set_player_time(format!("{} / {}", clock(pos), clock(dur)).into());
+                    ui.set_trim_label(
+                        format!(
+                            "{} – {} · {}s",
+                            clock(tin),
+                            clock(tout),
+                            (tout - tin).max(0.0).round() as u64
+                        )
+                        .into(),
+                    );
+                }
+            });
         }
     };
     let open_clip = Rc::new(open_clip);
@@ -872,23 +857,19 @@ pub fn library() -> Result<()> {
             let weak2 = weak.clone();
             let toast_at2 = toast_at.clone();
             let timer2 = toast_timer.clone();
-            toast_timer.start(
-                TimerMode::Repeated,
-                Duration::from_millis(33),
-                move || {
-                    let Some(ui) = weak2.upgrade() else { return };
-                    let Some(at) = toast_at2.get() else { return };
-                    let left = 1.0 - at.elapsed().as_secs_f32() / 6.0;
-                    if left <= 0.0 {
-                        ui.set_toast_frac(0.0);
-                        ui.set_toast_visible(false);
-                        toast_at2.set(None);
-                        timer2.stop();
-                    } else {
-                        ui.set_toast_frac(left);
-                    }
-                },
-            );
+            toast_timer.start(TimerMode::Repeated, Duration::from_millis(33), move || {
+                let Some(ui) = weak2.upgrade() else { return };
+                let Some(at) = toast_at2.get() else { return };
+                let left = 1.0 - at.elapsed().as_secs_f32() / 6.0;
+                if left <= 0.0 {
+                    ui.set_toast_frac(0.0);
+                    ui.set_toast_visible(false);
+                    toast_at2.set(None);
+                    timer2.stop();
+                } else {
+                    ui.set_toast_frac(left);
+                }
+            });
         }
     };
     let show_toast = Rc::new(show_toast);
@@ -1151,11 +1132,9 @@ pub fn library() -> Result<()> {
                 format!("{video} · {mbps:.0} Mb/s")
             };
             ui.set_quality_note(note.into());
-            let mic_on = s
-                .as_ref()
-                .map_or(cfg.mic != AudioSource::None, |s| {
-                    get(s, "mic_setting") != "none"
-                });
+            let mic_on = s.as_ref().map_or(cfg.mic != AudioSource::None, |s| {
+                get(s, "mic_setting") != "none"
+            });
             let app_tracks = match cfg.audio {
                 AudioSource::None => 0,
                 AudioSource::Auto => {
@@ -1272,67 +1251,59 @@ pub fn library() -> Result<()> {
         let game_pending = game_pending.clone();
         let apply_filter = apply_filter.clone();
         let refresh = refresh.clone();
-        export_timer.start(
-            TimerMode::Repeated,
-            Duration::from_millis(100),
-            move || {
-                let Some(ui) = weak.upgrade() else { return };
-                if let Some((gen, msg)) = export_done.lock().unwrap().take() {
-                    ui.set_exporting(false);
-                    if player_gen.load(Ordering::SeqCst) == gen {
-                        ui.set_export_status(
-                            msg.unwrap_or_else(|| "Exported".into()).into(),
-                        );
-                    }
-                    refresh();
+        export_timer.start(TimerMode::Repeated, Duration::from_millis(100), move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if let Some((gen, msg)) = export_done.lock().unwrap().take() {
+                ui.set_exporting(false);
+                if player_gen.load(Ordering::SeqCst) == gen {
+                    ui.set_export_status(msg.unwrap_or_else(|| "Exported".into()).into());
                 }
-                let thumbs = std::mem::take(&mut *thumb_done.lock().unwrap());
-                if !thumbs.is_empty() {
-                    {
-                        let mut cards = master.borrow_mut();
-                        for (clip, png) in thumbs {
-                            let Ok(img) = slint::Image::load_from_path(&png)
-                            else {
-                                continue;
-                            };
-                            let path = clip.display().to_string();
-                            if let Some(c) = cards.iter_mut().find(|c| c.path == path) {
-                                c.thumb = img;
-                            }
-                        }
-                    }
-                    apply_filter(&ui, true);
-                }
-                let found = std::mem::take(&mut *game_done.lock().unwrap());
-                if !found.is_empty() {
-                    {
-                        let mut infos = game_infos.borrow_mut();
-                        for (slug, name, icon) in found {
-                            game_pending.borrow_mut().remove(&slug);
-                            let icon = icon
-                                .and_then(|p| slint::Image::load_from_path(&p).ok());
-                            infos.insert(slug, GameUi { name, icon });
-                        }
-                    }
-                    // Cards that were drawn with fallbacks get the resolved
-                    // name and icon now.
-                    let infos = game_infos.borrow();
-                    for c in master.borrow_mut().iter_mut() {
-                        let Some(g) = infos.get(c.game.as_str()) else {
+                refresh();
+            }
+            let thumbs = std::mem::take(&mut *thumb_done.lock().unwrap());
+            if !thumbs.is_empty() {
+                {
+                    let mut cards = master.borrow_mut();
+                    for (clip, png) in thumbs {
+                        let Ok(img) = slint::Image::load_from_path(&png) else {
                             continue;
                         };
-                        if let Some(name) = &g.name {
-                            c.title = name.clone().into();
-                            c.initial = initial(name);
-                        }
-                        if let Some(icon) = &g.icon {
-                            c.icon = icon.clone();
+                        let path = clip.display().to_string();
+                        if let Some(c) = cards.iter_mut().find(|c| c.path == path) {
+                            c.thumb = img;
                         }
                     }
-                    apply_filter(&ui, true);
                 }
-            },
-        );
+                apply_filter(&ui, true);
+            }
+            let found = std::mem::take(&mut *game_done.lock().unwrap());
+            if !found.is_empty() {
+                {
+                    let mut infos = game_infos.borrow_mut();
+                    for (slug, name, icon) in found {
+                        game_pending.borrow_mut().remove(&slug);
+                        let icon = icon.and_then(|p| slint::Image::load_from_path(&p).ok());
+                        infos.insert(slug, GameUi { name, icon });
+                    }
+                }
+                // Cards that were drawn with fallbacks get the resolved
+                // name and icon now.
+                let infos = game_infos.borrow();
+                for c in master.borrow_mut().iter_mut() {
+                    let Some(g) = infos.get(c.game.as_str()) else {
+                        continue;
+                    };
+                    if let Some(name) = &g.name {
+                        c.title = name.clone().into();
+                        c.initial = initial(name);
+                    }
+                    if let Some(icon) = &g.icon {
+                        c.icon = icon.clone();
+                    }
+                }
+                apply_filter(&ui, true);
+            }
+        });
     }
 
     // Selection state shared by click and drag: the last clicked card (anchor
@@ -1632,8 +1603,7 @@ pub fn library() -> Result<()> {
             // the seek is issued after play so it also wins over the EOS
             // restart play() does on its own.
             if let Some(ui) = weak.upgrade() {
-                let (tin, tout, pos) =
-                    (ui.get_trim_in(), ui.get_trim_out(), ui.get_pos());
+                let (tin, tout, pos) = (ui.get_trim_in(), ui.get_trim_out(), ui.get_pos());
                 if tout > tin && !(pos >= tin && pos < tout) {
                     p.seek(gst::ClockTime::from_seconds_f64(tin as f64));
                     ui.set_pos(tin);
@@ -1660,7 +1630,9 @@ pub fn library() -> Result<()> {
         let player_path = player_path.clone();
         let open_clip = open_clip.clone();
         move |ui: &Library, dir: i32| {
-            let Some(cur) = player_path.borrow().clone() else { return };
+            let Some(cur) = player_path.borrow().clone() else {
+                return;
+            };
             let model = ui.get_clips();
             let Some(i) = model.iter().position(|c| Path::new(c.path.as_str()) == cur) else {
                 return;
@@ -1719,7 +1691,9 @@ pub fn library() -> Result<()> {
         ui.on_toggle_track(move |i| {
             let Some(ui) = weak.upgrade() else { return };
             let model = ui.get_tracks();
-            let Some(mut t) = model.row_data(i as usize) else { return };
+            let Some(mut t) = model.row_data(i as usize) else {
+                return;
+            };
             if !t.audio {
                 return;
             }
@@ -1737,7 +1711,9 @@ pub fn library() -> Result<()> {
         ui.on_set_track_volume(move |i, v| {
             let Some(ui) = weak.upgrade() else { return };
             let model = ui.get_tracks();
-            let Some(mut t) = model.row_data(i as usize) else { return };
+            let Some(mut t) = model.row_data(i as usize) else {
+                return;
+            };
             if !t.audio {
                 return;
             }
@@ -1894,7 +1870,9 @@ pub fn library() -> Result<()> {
         let open_dialog = open_dialog.clone();
         ui.on_ask_delete_current(move || {
             let Some(ui) = weak.upgrade() else { return };
-            let Some(path) = player_path.borrow().clone() else { return };
+            let Some(path) = player_path.borrow().clone() else {
+                return;
+            };
             // Footage can't keep rolling under a dialog about deleting it.
             if let Some(p) = player.borrow().as_ref() {
                 p.pause();
@@ -1972,10 +1950,9 @@ pub fn library() -> Result<()> {
         let weak = ui.as_weak();
         Timer::single_shot(Duration::from_millis(100), move || {
             if let Some(ui) = weak.upgrade() {
-                ui.window()
-                    .with_winit_window(|w| {
-                        let _ = platform::activate::activate(w, &token);
-                    });
+                ui.window().with_winit_window(|w| {
+                    let _ = platform::activate::activate(w, &token);
+                });
             }
         });
     }

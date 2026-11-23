@@ -68,7 +68,9 @@ fn activation_token() -> Option<String> {
 
 /// Focus the open library if there is one, else open it.
 fn open_or_focus(token: Option<String>) {
-    let line = token.as_deref().map_or("focus".to_owned(), |t| format!("focus {t}"));
+    let line = token
+        .as_deref()
+        .map_or("focus".to_owned(), |t| format!("focus {t}"));
     if !ipc::tell_library(&line) {
         open_window("library", token.as_deref());
     }
@@ -200,8 +202,14 @@ mod tests {
     #[test]
     fn double_click_timing() {
         let t0 = std::time::Instant::now();
-        assert!(is_double(Some(t0), t0 + std::time::Duration::from_millis(150)));
-        assert!(!is_double(Some(t0), t0 + std::time::Duration::from_millis(450)));
+        assert!(is_double(
+            Some(t0),
+            t0 + std::time::Duration::from_millis(150)
+        ));
+        assert!(!is_double(
+            Some(t0),
+            t0 + std::time::Duration::from_millis(450)
+        ));
         assert!(!is_double(None, t0));
     }
 }

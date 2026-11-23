@@ -10,9 +10,7 @@ pub struct GameInfo {
     pub icon: Option<PathBuf>,
 }
 
-const ICON_SIZES: [&str; 6] = [
-    "256x256", "128x128", "96x96", "64x64", "48x48", "32x32",
-];
+const ICON_SIZES: [&str; 6] = ["256x256", "128x128", "96x96", "64x64", "48x48", "32x32"];
 
 /// Resolved names and icons persist under `state_dir()/games`: a game that
 /// gets uninstalled takes its Steam manifest and icons with it, and this is
@@ -45,8 +43,7 @@ pub fn cached_icon(slug: &str) -> Option<PathBuf> {
 
 /// (name, icon path in the store) already persisted for a slug.
 fn stored(store: &Path, slug: &str) -> (Option<String>, Option<PathBuf>) {
-    let name =
-        std::fs::read_to_string(store.join(format!("{slug}.name"))).ok();
+    let name = std::fs::read_to_string(store.join(format!("{slug}.name"))).ok();
     let icon = stored_icon(store, slug);
     (name, icon)
 }
@@ -176,10 +173,13 @@ fn live_lookup(slugs: &[String]) -> HashMap<String, GameInfo> {
         } else if let Some(info) = desktop_match(slug) {
             out.insert(slug.clone(), info);
         } else {
-            out.insert(slug.clone(), GameInfo {
-                name: None,
-                icon: None,
-            });
+            out.insert(
+                slug.clone(),
+                GameInfo {
+                    name: None,
+                    icon: None,
+                },
+            );
         }
     }
     out
@@ -218,9 +218,7 @@ fn steam_games(roots: &[PathBuf]) -> HashMap<String, (String, String)> {
             let Some(name) = acf_value(&text, "name") else {
                 continue;
             };
-            found
-                .entry(crate::clips::slug(&name))
-                .or_insert((name, id));
+            found.entry(crate::clips::slug(&name)).or_insert((name, id));
         }
     }
     found
@@ -396,7 +394,10 @@ Name=Not it
 ";
         assert_eq!(
             desktop_entry(desktop),
-            Some(("Crimson Desert Enhanced".into(), "steam_icon_3321460".into()))
+            Some((
+                "Crimson Desert Enhanced".into(),
+                "steam_icon_3321460".into()
+            ))
         );
         // No [Desktop Entry] group at all.
         assert_eq!(desktop_entry("[Other]\nName=x"), None);
@@ -415,10 +416,13 @@ Name=Not it
         std::fs::create_dir_all(src.parent().unwrap()).unwrap();
         std::fs::write(&src, b"png-bytes").unwrap();
         let live = |_: &[String]| {
-            HashMap::from([("Elden_Ring".to_owned(), GameInfo {
-                name: Some("Elden Ring".into()),
-                icon: Some(src.clone()),
-            })])
+            HashMap::from([(
+                "Elden_Ring".to_owned(),
+                GameInfo {
+                    name: Some("Elden Ring".into()),
+                    icon: Some(src.clone()),
+                },
+            )])
         };
         let out = lookup_in(&["Elden_Ring".into()], &store, live);
         let info = &out["Elden_Ring"];
@@ -462,10 +466,13 @@ Name=Not it
     fn partial_cache_keeps_asking_live() {
         let store = tmp_store("name");
         let live = |_: &[String]| {
-            HashMap::from([("Half_Life".to_owned(), GameInfo {
-                name: Some("Half-Life".into()),
-                icon: None,
-            })])
+            HashMap::from([(
+                "Half_Life".to_owned(),
+                GameInfo {
+                    name: Some("Half-Life".into()),
+                    icon: None,
+                },
+            )])
         };
         let out = lookup_in(&["Half_Life".into()], &store, live);
         assert_eq!(out["Half_Life"].name.as_deref(), Some("Half-Life"));
@@ -492,10 +499,15 @@ Name=Not it
         let live = |slugs: &[String]| {
             slugs
                 .iter()
-                .map(|s| (s.clone(), GameInfo {
-                    name: Some("x".into()),
-                    icon: None,
-                }))
+                .map(|s| {
+                    (
+                        s.clone(),
+                        GameInfo {
+                            name: Some("x".into()),
+                            icon: None,
+                        },
+                    )
+                })
                 .collect::<HashMap<String, GameInfo>>()
         };
         let out = lookup_in(&["../evil".into(), "".into()], &store, live);

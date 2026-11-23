@@ -30,8 +30,7 @@ pub fn keyframes(path: &Path) -> Result<Vec<f64>> {
                 .new_sample({
                     let times = times.clone();
                     move |sink| {
-                        let sample =
-                            sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                        let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                         if let Some(buf) = sample.buffer() {
                             if !buf.flags().contains(gst::BufferFlags::DELTA_UNIT) {
                                 if let Some(t) = buf.pts().or(buf.dts()) {
@@ -85,13 +84,7 @@ pub fn snap_start(keys: &[f64], t: f64) -> f64 {
 /// cut can only begin where a GOP begins. `mix[i]` is the volume and mute
 /// of audio track `audio_i`, in demux order; all tracks become one "Mix"
 /// track. Ends mid-GOP are fine — the demuxer just stops there.
-pub fn export(
-    src: &Path,
-    start: f64,
-    end: f64,
-    mix: &[(f64, bool)],
-    out: &Path,
-) -> Result<()> {
+pub fn export(src: &Path, start: f64, end: f64, mix: &[(f64, bool)], out: &Path) -> Result<()> {
     if end <= start {
         bail!("empty selection");
     }
@@ -118,9 +111,7 @@ pub fn export(
         move |_, pad| {
             let name = pad.name().to_string();
             if name.starts_with("video") {
-                let (Some(pipeline), Some(mux)) =
-                    (pipeline.upgrade(), mux.upgrade())
-                else {
+                let (Some(pipeline), Some(mux)) = (pipeline.upgrade(), mux.upgrade()) else {
                     return;
                 };
                 match link_video(&pipeline, pad, &mux) {
@@ -134,9 +125,7 @@ pub fn export(
                 .strip_prefix("audio_")
                 .and_then(|n| n.parse::<usize>().ok())
             {
-                let (Some(pipeline), Some(mux)) =
-                    (pipeline.upgrade(), mux.upgrade())
-                else {
+                let (Some(pipeline), Some(mux)) = (pipeline.upgrade(), mux.upgrade()) else {
                     return;
                 };
                 if mixer.lock().unwrap().is_none() {
@@ -262,7 +251,9 @@ fn link_video(pipeline: &gst::Pipeline, pad: &gst::Pad, mux: &gst::Element) -> R
     let parse = make("h264parse", &[])?;
     pipeline.add_many([&queue, &parse])?;
     queue.link(&parse)?;
-    parse.link(mux).context("mp4mux does not accept the video")?;
+    parse
+        .link(mux)
+        .context("mp4mux does not accept the video")?;
     pad.link(&queue.static_pad("sink").unwrap())?;
     for e in [&queue, &parse] {
         e.sync_state_with_parent()?;
