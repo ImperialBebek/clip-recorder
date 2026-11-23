@@ -59,8 +59,15 @@ pub fn unique_path(dir: &Path, name: &str) -> PathBuf {
 /// segment after the timestamp marks an exported clip.
 fn game_of(stem: &str) -> (String, bool) {
     let parts: Vec<&str> = stem.split('_').collect();
+    let is_trim = |p: &str| {
+        p == "trim" || p.strip_prefix("trim-").is_some_and(|n| n.parse::<u32>().is_ok())
+    };
     let Some(i) = date_pos(&parts) else {
-        return (stem.to_owned(), false);
+        // A clip renamed without its timestamp still gets `_trim` on export.
+        return match parts.split_last() {
+            Some((last, rest)) if !rest.is_empty() && is_trim(last) => (rest.join("_"), true),
+            _ => (stem.to_owned(), false),
+        };
     };
     (
         parts[..i].join("_"),
@@ -334,5 +341,8 @@ mod tests {
             ("Elden_Ring".to_owned(), false)
         );
         assert_eq!(game_of("whatever"), ("whatever".to_owned(), false));
+        assert_eq!(game_of("My_Clip_trim"), ("My_Clip".to_owned(), true));
+        assert_eq!(game_of("My_Clip_trim-3"), ("My_Clip".to_owned(), true));
+        assert_eq!(game_of("trim"), ("trim".to_owned(), false));
     }
 }
