@@ -91,11 +91,13 @@ fn game_of(stem: &str) -> (String, bool) {
                 .is_some_and(|n| n.parse::<u32>().is_ok())
     };
     let Some(i) = date_pos(&parts) else {
-        // A clip renamed without its timestamp still gets `_trim` on export.
-        return match parts.split_last() {
-            Some((last, rest)) if !rest.is_empty() && is_trim(last) => (rest.join("_"), true),
-            _ => (stem.to_owned(), false),
-        };
+        // A clip renamed without its timestamp still gets `_trim` on export,
+        // once per re-export.
+        let mut end = parts.len();
+        while end > 1 && is_trim(parts[end - 1]) {
+            end -= 1;
+        }
+        return (parts[..end].join("_"), end < parts.len());
     };
     (
         parts[..i].join("_"),
@@ -372,6 +374,7 @@ mod tests {
         assert_eq!(game_of("My_Clip_trim"), ("My_Clip".to_owned(), true));
         assert_eq!(game_of("My_Clip_trim-3"), ("My_Clip".to_owned(), true));
         assert_eq!(game_of("trim"), ("trim".to_owned(), false));
+        assert_eq!(game_of("Match_trim_trim-2"), ("Match".to_owned(), true));
     }
 
     #[test]
