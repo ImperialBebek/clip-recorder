@@ -98,7 +98,7 @@ pub fn list(dir: &Path) -> Vec<Clip> {
     };
     let mut clips: Vec<(SystemTime, u64, PathBuf)> = rd
         .flatten()
-        .filter(|e| e.path().extension().is_some_and(|x| x == "mp4"))
+        .filter(|e| e.path().extension().is_some_and(|x| x == "mp4") && e.path().is_file())
         .filter_map(|e| {
             let m = e.metadata().ok()?;
             Some((m.modified().ok()?, m.len(), e.path()))
@@ -132,7 +132,7 @@ fn clips_in_dir<'a>(dir: &Path, paths: &'a [PathBuf]) -> Vec<&'a PathBuf> {
     };
     paths
         .iter()
-        .filter(|p| p.extension().is_some_and(|x| x == "mp4"))
+        .filter(|p| p.extension().is_some_and(|x| x == "mp4") && p.is_file())
         .filter(|p| p.parent().and_then(|d| d.canonicalize().ok()).as_deref() == Some(&dir))
         .collect()
 }
@@ -214,7 +214,7 @@ pub fn usage(dir: &Path) -> (u64, usize) {
         return (0, 0);
     };
     rd.flatten()
-        .filter(|e| e.path().extension().is_some_and(|x| x == "mp4"))
+        .filter(|e| e.path().extension().is_some_and(|x| x == "mp4") && e.path().is_file())
         .filter_map(|e| e.metadata().ok())
         .fold((0, 0), |(b, n), m| (b + m.len(), n + 1))
 }
