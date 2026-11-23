@@ -192,8 +192,20 @@ pub fn untrash(dir: &Path, paths: &[PathBuf]) -> Vec<PathBuf> {
     }
     if let Err(e) = trash::os_limited::restore_all(chosen) {
         eprintln!("restore from trash: {e}");
+        // The trash crate reserves each name with an empty file before its
+        // rename; when the rename fails (e.g. a clips folder on another drive
+        // than the Trash) that placeholder stays behind. Clips are never
+        // empty, so drop those and leave the clip in the Trash.
+        for p in &wanted {
+            if std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.len() == 0) {
+                let _ = std::fs::remove_file(p);
+            }
+        }
     }
-    wanted.into_iter().filter(|p| p.exists()).collect()
+    wanted
+        .into_iter()
+        .filter(|p| std::fs::metadata(p).is_ok_and(|m| m.len() > 0))
+        .collect()
 }
 
 /// Total size and count of the clips in `dir`.
