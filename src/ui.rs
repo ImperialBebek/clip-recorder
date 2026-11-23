@@ -1529,8 +1529,11 @@ pub fn library() -> Result<()> {
     {
         let weak = ui.as_weak();
         let apply_filter = apply_filter.clone();
+        let anchor = anchor.clone();
         ui.on_set_game_filter(move |key| {
             let Some(ui) = weak.upgrade() else { return };
+            // Indices from the old list mean other clips in the new one.
+            anchor.set(None);
             ui.set_game_filter(key);
             apply_filter(&ui, false);
         });
@@ -1538,8 +1541,10 @@ pub fn library() -> Result<()> {
     {
         let weak = ui.as_weak();
         let apply_filter = apply_filter.clone();
+        let anchor = anchor.clone();
         ui.on_toggle_exported(move || {
             let Some(ui) = weak.upgrade() else { return };
+            anchor.set(None);
             ui.set_exported_only(!ui.get_exported_only());
             apply_filter(&ui, false);
         });
