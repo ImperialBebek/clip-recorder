@@ -818,13 +818,19 @@ pub fn library() -> Result<()> {
                         };
                         // A trimmed range loops: at trim-out, jump back to
                         // trim-in. Covering the whole clip keeps normal EOS.
-                        if p.playing()
+                        // With only trim-in moved, trim-out is the clip's end,
+                        // which arrives as EOS rather than while playing.
+                        let trimmed =
+                            tout > tin && (tout < dur - 0.05 || tin > 0.05);
+                        if trimmed
                             && !ui.get_scrubbing()
-                            && tout > tin
-                            && tout < dur - 0.05
+                            && (p.playing() || p.ended())
                             && pos >= tout
                         {
                             p.seek(gst::ClockTime::from_seconds_f64(tin as f64));
+                            if !p.playing() {
+                                p.play();
+                            }
                             pos = tin;
                             ui.set_pos(pos);
                         }
