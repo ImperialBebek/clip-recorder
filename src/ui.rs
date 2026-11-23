@@ -780,10 +780,15 @@ pub fn library() -> Result<()> {
             pos_timer.start(TimerMode::Repeated, Duration::from_millis(33), {
                 let weak = weak.clone();
                 let player = player.clone();
+                let was_ended = Cell::new(false);
                 move || {
                     let Some(ui) = weak.upgrade() else { return };
                     let borrow = player.borrow();
                     let Some(p) = borrow.as_ref() else { return };
+                    // Only the tick where EOS arrives restarts a loop; a trim
+                    // edit after playback stopped keeps it stopped.
+                    let just_ended = p.ended() && !was_ended.get();
+                    was_ended.set(p.ended());
                     if let Some(d) = p.duration() {
                         ui.set_dur(d.seconds_f64() as f32);
                     }
@@ -814,7 +819,8 @@ pub fn library() -> Result<()> {
                     // With only trim-in moved, trim-out is the clip's end,
                     // which arrives as EOS rather than while playing.
                     let trimmed = tout > tin && (tout < dur - 0.05 || tin > 0.05);
-                    if trimmed && !ui.get_scrubbing() && (p.playing() || p.ended()) && pos >= tout {
+                    if trimmed && !ui.get_scrubbing() && (p.playing() || just_ended) && pos >= tout
+                    {
                         p.seek(gst::ClockTime::from_seconds_f64(tin as f64));
                         if !p.playing() {
                             p.play();
