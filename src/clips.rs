@@ -47,11 +47,16 @@ pub fn unique_path(dir: &Path, name: &str) -> PathBuf {
     let (stem, ext) = name.rsplit_once('.').unwrap_or((name, ""));
     let mut path = dir.join(name);
     let mut n = 2;
-    while path.exists() {
+    while taken(&path) {
         path = dir.join(format!("{stem}-{n}.{ext}"));
         n += 1;
     }
     path
+}
+
+/// Whether a directory entry uses `path`, including a dangling symlink.
+fn taken(path: &Path) -> bool {
+    path.symlink_metadata().is_ok()
 }
 
 /// Moves the finished file `tmp` to `path`, or to the next free `-N` name if
@@ -60,24 +65,23 @@ pub fn unique_path(dir: &Path, name: &str) -> PathBuf {
 pub fn publish(tmp: &Path, path: &Path) -> std::io::Result<PathBuf> {
     let dir = path.parent().unwrap_or(Path::new("."));
     let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let (stem, ext) = name.rsplit_once('.').unwrap_or((&name, ""));
     let mut dest = path.to_path_buf();
-    loop {
+    for n in 2.. {
         match std::fs::hard_link(tmp, &dest) {
             Ok(()) => {
                 let _ = std::fs::remove_file(tmp);
                 return Ok(dest);
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                dest = unique_path(dir, &name);
-            }
             // Filesystems without hard links (FAT, some FUSE mounts).
-            Err(_) if !dest.exists() => {
+            Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists && !taken(&dest) => {
                 std::fs::rename(tmp, &dest)?;
                 return Ok(dest);
             }
-            Err(_) => dest = unique_path(dir, &name),
+            Err(_) => dest = dir.join(format!("{stem}-{n}.{ext}")),
         }
     }
+    unreachable!()
 }
 
 /// (grouping slug, is-a-trim-export) from a clip stem: the slug is
@@ -390,6 +394,12 @@ mod tests {
         assert_eq!(std::fs::read(&taken).unwrap(), b"restored");
         assert_eq!(std::fs::read(&out).unwrap(), b"export");
         assert!(!tmp.exists());
+
+        std::os::unix::fs::symlink(dir.join("gone.mp4"), dir.join("b.mp4")).unwrap();
+        std::fs::write(&tmp, b"export").unwrap();
+        let out = publish(&tmp, &dir.join("b.mp4")).unwrap();
+        assert_eq!(out, dir.join("b-2.mp4"));
+        assert!(dir.join("b.mp4").symlink_metadata().unwrap().is_symlink());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
