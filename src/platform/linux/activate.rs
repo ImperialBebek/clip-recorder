@@ -8,9 +8,7 @@ use slint::winit_030::winit::raw_window_handle::{
     HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
 };
 use slint::winit_030::winit::window::Window;
-use smithay_client_toolkit::reexports::client::globals::{
-    registry_queue_init, GlobalListContents,
-};
+use smithay_client_toolkit::reexports::client::globals::{registry_queue_init, GlobalListContents};
 use smithay_client_toolkit::reexports::client::protocol::{wl_registry, wl_surface};
 use smithay_client_toolkit::reexports::client::{Connection, Dispatch, Proxy, QueueHandle};
 use smithay_client_toolkit::reexports::protocols::xdg::activation::v1::client::xdg_activation_v1;
@@ -39,8 +37,9 @@ pub fn activate(window: &Window, token: &str) -> Result<()> {
     .context("invalid wl_surface")?;
     let surface = wl_surface::WlSurface::from_id(&conn, surface_id)?;
     let (globals, _queue) = registry_queue_init::<State>(&conn)?;
-    let activation: xdg_activation_v1::XdgActivationV1 =
-        globals.bind(&_queue.handle(), 1..=1, ()).context("no xdg_activation_v1")?;
+    let activation: xdg_activation_v1::XdgActivationV1 = globals
+        .bind(&_queue.handle(), 1..=1, ())
+        .context("no xdg_activation_v1")?;
     activation.activate(token.to_owned(), &surface);
     activation.destroy();
     conn.flush()?;

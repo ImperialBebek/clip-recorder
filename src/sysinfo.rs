@@ -82,7 +82,7 @@ pub fn game_of_window(app_id: &str, pid: u32) -> Option<String> {
     exe
 }
 
-fn steam_roots() -> Vec<PathBuf> {
+pub(crate) fn steam_roots() -> Vec<PathBuf> {
     let home = crate::home();
     let mut roots = vec![
         home.join(".local/share/Steam"),

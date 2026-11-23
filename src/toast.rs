@@ -326,6 +326,18 @@ impl Overlay {
                 for line in lines.read() {
                     let Some(ev) = parse(&line) else { continue };
                     let (state, heading, detail, secs) = describe(&ev);
+                    // Store hits are just file reads; a slug the store
+                    // doesn't know shows the fallback dot rather than
+                    // paying for a live scan on the way to a 5 s toast.
+                    let icon = match &ev {
+                        Event::Game(name, _) => {
+                            crate::games::cached_icon(&crate::clips::slug(name))
+                                .and_then(|p| slint::Image::load_from_path(&p).ok())
+                                .unwrap_or_default()
+                        }
+                        _ => slint::Image::default(),
+                    };
+                    ui.set_game_icon(icon);
                     ui.set_state(state);
                     ui.set_heading(heading.into());
                     ui.set_detail(detail.into());

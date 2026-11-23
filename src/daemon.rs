@@ -220,10 +220,7 @@ impl Daemon {
                 rec.and_then(|r| r.audio_name).unwrap_or("off").into(),
             ),
             ("audio_setting", self.cfg.audio.name().into()),
-            (
-                "mic",
-                rec.and_then(|r| r.mic_name).unwrap_or("off").into(),
-            ),
+            ("mic", rec.and_then(|r| r.mic_name).unwrap_or("off").into()),
             ("mic_setting", self.cfg.mic.name().into()),
             ("mic_device", self.cfg.mic_device.clone()),
             (

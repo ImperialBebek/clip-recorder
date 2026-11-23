@@ -88,9 +88,7 @@ pub fn watch(on_event: impl Fn(StreamEvent) + Send + 'static) -> Result<Watcher>
                     .unwrap_or_default()
             };
             let reader = BufReader::new(stdout);
-            for dump in
-                serde_json::Deserializer::from_reader(reader).into_iter::<Vec<Value>>()
-            {
+            for dump in serde_json::Deserializer::from_reader(reader).into_iter::<Vec<Value>>() {
                 if !alive.load(Ordering::Relaxed) {
                     break;
                 }
@@ -265,11 +263,7 @@ fn add_node(
 
 /// Which track an app's output belongs to; `None` for streams that must never
 /// be recorded (our own recorder, library player and save chime).
-fn classify(
-    props: &serde_json::Map<String, Value>,
-    env: &str,
-    own_pid: u32,
-) -> Option<Category> {
+fn classify(props: &serde_json::Map<String, Value>, env: &str, own_pid: u32) -> Option<Category> {
     let pid = prop(props, "application.process.id");
     let pid = if pid.is_empty() {
         prop(props, "pipewire.sec.pid")

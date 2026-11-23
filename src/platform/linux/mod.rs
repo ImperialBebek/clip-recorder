@@ -104,8 +104,7 @@ pub fn mic_element(src: AudioSource, device: Option<&str>) -> Result<gst::Elemen
         AudioSource::PipeWire => {
             let mut props: Vec<(&str, &str)> = vec![("do-timestamp", "true")];
             let mut stream_props =
-                "props,media.category=(string)Capture,media.role=(string)Communication"
-                    .to_string();
+                "props,media.category=(string)Capture,media.role=(string)Communication".to_string();
             if let Some(dev) = device {
                 if pw_target_prop() == Some("target-object") {
                     props.push(("target-object", dev));

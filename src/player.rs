@@ -39,10 +39,7 @@ impl Player {
     ) -> Result<Self> {
         gst::init()?;
         let pipeline = gst::Pipeline::with_name("player");
-        let src = make(
-            "filesrc",
-            &[("location", path_str(path)?)],
-        )?;
+        let src = make("filesrc", &[("location", path_str(path)?)])?;
         let demux = make("qtdemux", &[])?;
         let mixer = make("audiomixer", &[])?;
         let master = make("volume", &[])?;
@@ -70,9 +67,10 @@ impl Player {
             move |_, pad| {
                 let name = pad.name().to_string();
                 if name.starts_with("video") {
-                    let Some(pipeline) = pipeline.upgrade() else { return };
-                    if let Err(e) =
-                        add_video(&pipeline, pad, on_frame.clone(), want_frame.clone())
+                    let Some(pipeline) = pipeline.upgrade() else {
+                        return;
+                    };
+                    if let Err(e) = add_video(&pipeline, pad, on_frame.clone(), want_frame.clone())
                     {
                         eprintln!("player video: {e:#}");
                     }
@@ -90,8 +88,7 @@ impl Player {
                                     let tags = tag.tag();
                                     if tags.scope() == gst::TagScope::Stream {
                                         if let Some(t) = tags.get::<gst::tags::Title>() {
-                                            titles.lock().unwrap()[i] =
-                                                Some(t.get().to_owned());
+                                            titles.lock().unwrap()[i] = Some(t.get().to_owned());
                                         }
                                     }
                                 }
@@ -99,8 +96,7 @@ impl Player {
                             gst::PadProbeReturn::Ok
                         }
                     });
-                    let (Some(pipeline), Some(mixer)) =
-                        (pipeline.upgrade(), mixer.upgrade())
+                    let (Some(pipeline), Some(mixer)) = (pipeline.upgrade(), mixer.upgrade())
                     else {
                         return;
                     };
@@ -121,9 +117,10 @@ impl Player {
                 if !track_volumes.lock().unwrap().is_empty() {
                     return;
                 }
-                let Some(pipeline) = pipeline.upgrade() else { return };
-                let tail: Vec<gst::Element> =
-                    tail.iter().filter_map(|w| w.upgrade()).collect();
+                let Some(pipeline) = pipeline.upgrade() else {
+                    return;
+                };
+                let tail: Vec<gst::Element> = tail.iter().filter_map(|w| w.upgrade()).collect();
                 for e in &tail {
                     let _ = e.set_state(gst::State::Null);
                 }
@@ -145,8 +142,7 @@ impl Player {
             let pipeline = pipeline.downgrade();
             move || {
                 while alive.load(Ordering::SeqCst) {
-                    let Some(msg) = bus.timed_pop(gst::ClockTime::from_mseconds(100))
-                    else {
+                    let Some(msg) = bus.timed_pop(gst::ClockTime::from_mseconds(100)) else {
                         continue;
                     };
                     match msg.view() {
@@ -319,9 +315,7 @@ pub fn waveform(path: &Path, audio_index: usize, bins: usize) -> Result<Vec<f32>
                     let samples = samples.clone();
                     move |sink| {
                         let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
-                        if let Some(map) =
-                            sample.buffer().and_then(|b| b.map_readable().ok())
-                        {
+                        if let Some(map) = sample.buffer().and_then(|b| b.map_readable().ok()) {
                             let mut lock = samples.lock().unwrap();
                             lock.extend(
                                 map.as_slice()
@@ -353,9 +347,7 @@ pub fn waveform(path: &Path, audio_index: usize, bins: usize) -> Result<Vec<f32>
         let decode = decode.clone();
         let linked = linked.clone();
         move |_, pad| {
-            if pad.name() == want
-                && pad.link(&decode.static_pad("sink").unwrap()).is_ok()
-            {
+            if pad.name() == want && pad.link(&decode.static_pad("sink").unwrap()).is_ok() {
                 linked.store(true, Ordering::SeqCst);
             }
         }
@@ -704,8 +696,7 @@ mod tests {
                     frames.fetch_add(1, Ordering::Relaxed);
                 }
             };
-            let player =
-                Player::open(Path::new(path), on_frame, || true, |_| {}, |_| {}).unwrap();
+            let player = Player::open(Path::new(path), on_frame, || true, |_| {}, |_| {}).unwrap();
             eprintln!("{path}: duration {:?}", player.duration());
             player.play();
             std::thread::sleep(std::time::Duration::from_secs(8));
@@ -799,7 +790,10 @@ mod tests {
         src.end_of_stream().unwrap();
         let bus = pipeline.bus().unwrap();
         for msg in bus.iter_timed(gst::ClockTime::from_seconds(10)) {
-            if matches!(msg.view(), gst::MessageView::Eos(_) | gst::MessageView::Error(_)) {
+            if matches!(
+                msg.view(),
+                gst::MessageView::Eos(_) | gst::MessageView::Error(_)
+            ) {
                 break;
             }
         }
