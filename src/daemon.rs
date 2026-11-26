@@ -17,8 +17,8 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc;
 
 use crate::capture::{AudioSource, BusEvent, Recorder, Settings, VideoSource};
-use crate::config::{self, Capture, Config};
-use crate::encoder::Encoder;
+use crate::config::{self, Capture, CodecSetting, Config};
+use crate::encoder::{candidates, Codec, Encoder};
 use crate::platform::{self, hotkey, ipc, kwin, portal, shortcuts, tray};
 use crate::ring::Ring;
 use crate::{clips, save, sysinfo};
@@ -103,7 +103,9 @@ impl Daemon {
         Settings {
             fps: self.cfg.fps,
             kbps: self.flags.kbps.unwrap_or(self.cfg.quality.kbps()),
+            kbps_from_preset: self.flags.kbps.is_none(),
             encoder: self.cfg.encoder,
+            codec_auto: self.cfg.codec == CodecSetting::Auto,
             audio,
             mic,
             mic_device: (!self.cfg.mic_device.is_empty()).then(|| self.cfg.mic_device.clone()),
@@ -111,6 +113,32 @@ impl Daemon {
             track_voice: self.cfg.track_voice,
             track_other: self.cfg.track_other,
         }
+    }
+
+    fn av1_supported(&self) -> bool {
+        candidates(self.cfg.encoder)
+            .into_iter()
+            .any(|e| e.supports(Codec::Av1))
+    }
+
+    /// The running recorder's codec, else the one the next start would pick.
+    fn status_codec(&self) -> Codec {
+        match &self.recorder {
+            Some(rec) => rec.codec,
+            None if self.settings().codec_auto && self.av1_supported() => Codec::Av1,
+            None => Codec::H264,
+        }
+    }
+
+    fn status_kbps(&self) -> u32 {
+        if let Some(rec) = &self.recorder {
+            return rec.kbps;
+        }
+        let s = self.settings();
+        if !s.kbps_from_preset {
+            return s.kbps;
+        }
+        self.status_codec().kbps(s.kbps)
     }
 
     fn start(&mut self) -> Result<()> {
@@ -132,10 +160,11 @@ impl Daemon {
             }
         }
         eprintln!(
-            "recording: {}s buffer, {} fps, {} kbit/s, encoder {}, audio {}",
+            "recording: {}s buffer, {} fps, {} kbit/s, {} on {}, audio {}",
             self.cfg.duration,
             self.cfg.fps,
-            self.settings().kbps,
+            rec.kbps,
+            rec.codec.label(),
             rec.encoder.name(),
             rec.audio_name.unwrap_or("off"),
         );
@@ -210,10 +239,15 @@ impl Daemon {
                 "encoder_setting",
                 self.cfg.encoder.map_or("auto", |e| e.name()).to_owned(),
             ),
-            ("codec", "H.264".into()),
+            ("codec", self.status_codec().label().into()),
+            ("codec_setting", self.cfg.codec.name().into()),
+            (
+                "av1",
+                if self.av1_supported() { "yes" } else { "no" }.into(),
+            ),
             ("video", ring.video_label(self.cfg.fps).unwrap_or_default()),
             ("fps", self.cfg.fps.to_string()),
-            ("kbps", self.settings().kbps.to_string()),
+            ("kbps", self.status_kbps().to_string()),
             ("quality", self.cfg.quality.name().into()),
             (
                 "audio",
@@ -293,6 +327,7 @@ impl Daemon {
         let restart = new.fps != self.cfg.fps
             || new.quality != self.cfg.quality
             || new.encoder != self.cfg.encoder
+            || new.codec != self.cfg.codec
             || new.audio != self.cfg.audio
             || new.mic != self.cfg.mic
             || new.mic_device != self.cfg.mic_device

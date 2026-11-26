@@ -8,7 +8,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 
-use crate::encoder::Encoder;
+use crate::encoder::{attempts, candidates, Codec, Encoder};
 use crate::gst_util::{add_chain, capsfilter, has, make};
 use crate::platform;
 use crate::platform::streams::{self, AppStream, Category, StreamEvent, Watcher};
@@ -56,7 +56,11 @@ impl AudioSource {
 pub struct Settings {
     pub fps: u32,
     pub kbps: u32,
+    /// `kbps` is an H.264 figure to scale per codec, not an explicit `--bitrate`.
+    pub kbps_from_preset: bool,
     pub encoder: Option<Encoder>,
+    /// Allow AV1 where an encoder supports it.
+    pub codec_auto: bool,
     pub audio: AudioSource,
     /// Microphone, saved as its own audio track.
     pub mic: AudioSource,
@@ -80,6 +84,9 @@ pub struct CategoryShared {
 pub struct Recorder {
     pub video: gst::Pipeline,
     pub encoder: Encoder,
+    pub codec: Codec,
+    /// Bitrate the encoder was actually asked for.
+    pub kbps: u32,
     pub audio_name: Option<&'static str>,
     pub mic_name: Option<&'static str>,
     /// Aux track titles in ring order, e.g. ["Game", "Voice", "Mic"].
@@ -113,30 +120,33 @@ impl Recorder {
         let clock = gst::SystemClock::obtain();
         let base = clock.time();
 
-        let candidates: Vec<Encoder> = match settings.encoder {
-            Some(e) => vec![e],
-            None => Encoder::AUTO_ORDER
-                .into_iter()
-                .filter(|e| e.available())
-                .collect(),
-        };
-        if candidates.is_empty() {
+        let tries = attempts(
+            &candidates(settings.encoder),
+            settings.codec_auto,
+            |e, c| e.supports(c),
+        );
+        if tries.is_empty() {
             bail!("no H.264 encoder found; install gst-plugins-bad (va), gstreamer-vaapi, or gst-plugins-ugly (x264)");
         }
 
         let mut video = None;
-        for enc in candidates {
-            let attempt = build_video(source, settings, enc, ring.clone())
+        for (enc, codec) in tries {
+            let kbps = if settings.kbps_from_preset {
+                codec.kbps(settings.kbps)
+            } else {
+                settings.kbps
+            };
+            let attempt = build_video(source, settings, enc, codec, kbps, ring.clone())
                 .and_then(|(p, first)| start_checked(&p, &clock, base, first).map(|_| p));
             match attempt {
                 Ok(p) => {
-                    video = Some((p, enc));
+                    video = Some((p, enc, codec, kbps));
                     break;
                 }
-                Err(e) => eprintln!("encoder {}: {e:#}", enc.name()),
+                Err(e) => eprintln!("encoder {} ({}): {e:#}", enc.name(), codec.name()),
             }
         }
-        let (video, encoder) =
+        let (video, encoder, codec, kbps) =
             video.ok_or_else(|| anyhow!("no encoder could start, see errors above"))?;
         let video_alive = Arc::new(AtomicBool::new(true));
         let audio_alive = Arc::new(AtomicBool::new(true));
@@ -289,6 +299,8 @@ impl Recorder {
         Ok(Self {
             video,
             encoder,
+            codec,
+            kbps,
             audio_name,
             mic_name: mic.as_ref().map(|(_, n)| *n),
             tracks: ring
@@ -658,6 +670,8 @@ fn build_video(
     source: &VideoSource,
     s: &Settings,
     enc: Encoder,
+    codec: Codec,
+    kbps: u32,
     ring: Arc<Mutex<Ring>>,
 ) -> Result<(gst::Pipeline, mpsc::Receiver<()>)> {
     let pipeline = gst::Pipeline::with_name("video");
@@ -672,9 +686,13 @@ fn build_video(
         ],
     };
     chain.extend(rate_cap(s.fps.max(1))?);
-    chain.extend(enc.elements(s.kbps, s.fps.max(1))?);
-    chain.push(make("h264parse", &[("config-interval", "-1")])?);
-    chain.push(capsfilter("video/x-h264,stream-format=avc,alignment=au")?);
+    chain.extend(enc.elements(codec, kbps, s.fps.max(1))?);
+    let parser: &[(&str, &str)] = match codec {
+        Codec::H264 => &[("config-interval", "-1")],
+        Codec::Av1 => &[],
+    };
+    chain.push(make(codec.parser(), parser)?);
+    chain.push(capsfilter(codec.caps())?);
     let (sink, first) = appsink(move |caps, buf| ring.lock().unwrap().push_video(caps, buf));
     chain.push(sink);
     add_chain(&pipeline, &chain)?;
@@ -857,7 +875,9 @@ mod tests {
         let settings = Settings {
             fps: 30,
             kbps: 4000,
+            kbps_from_preset: false,
             encoder: None,
+            codec_auto: false,
             audio: AudioSource::Auto,
             mic: AudioSource::Test,
             mic_device: None,
@@ -891,7 +911,9 @@ mod tests {
         let settings = Settings {
             fps: 30,
             kbps: 4000,
+            kbps_from_preset: false,
             encoder: None,
+            codec_auto: false,
             audio: AudioSource::Test,
             mic: AudioSource::Test,
             mic_device: None,

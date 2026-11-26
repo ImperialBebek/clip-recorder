@@ -603,6 +603,12 @@ export component Library inherits Window {
     in property <int> quality: 1;
     in property <int> duration: 1;
     in property <string> quality-note;
+    in property <bool> encoder-row;
+    in property <string> encoder-note;
+    in property <bool> av1;
+    in property <int> codec: 0;
+    in property <string> codec-hint;
+    callback set-codec(int);
     in property <string> duration-note;
     in property <[string]> mics;
     in property <int> mic: 1;
@@ -1412,6 +1418,18 @@ export component Library inherits Window {
                     note: root.quality-note;
                     Segmented { fill: true; options: ["Light", "High", "Max"]; selected: root.quality; picked(i) => { root.set-quality(i); } }
                 }
+                if root.encoder-row: SettingRow {
+                    title: "Encoder";
+                    note: root.encoder-note;
+                    if root.av1: Segmented { fill: true; options: ["AV1", "H.264"]; selected: root.codec; picked(i) => { root.set-codec(i); } }
+                    Text {
+                        text: root.codec-hint;
+                        wrap: word-wrap;
+                        font-family: Theme.body-font;
+                        font-size: 11px;
+                        color: Theme.faint;
+                    }
+                }
                 SettingRow {
                     title: "Duration";
                     note: root.duration-note;
@@ -1446,7 +1464,7 @@ export component Library inherits Window {
                 }
                 Rectangle { height: 1px; background: Theme.divider; }
                 Text {
-                    text: "Applies instantly. Encoder and folder are picked for you.";
+                    text: "Applies instantly. The folder is picked for you.";
                     wrap: word-wrap;
                     font-family: Theme.body-font;
                     font-size: 11px;

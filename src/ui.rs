@@ -20,7 +20,7 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, Timer, TimerMode, Vec
 
 use crate::capture::AudioSource;
 use crate::clips;
-use crate::config::{self, Config, Quality};
+use crate::config::{self, CodecSetting, Config, Quality};
 use crate::platform::{self, ipc};
 
 slint::include_modules!();
@@ -1132,12 +1132,34 @@ pub fn library() -> Result<()> {
             let d = DURATIONS.iter().position(|&x| x == window);
             ui.set_duration(d.map_or(-1, |i| i as i32));
             let mbps = kbps as f64 / 1000.0;
-            let note = if video.is_empty() {
-                format!("{mbps:.0} Mb/s")
-            } else {
-                format!("{video} · {mbps:.0} Mb/s")
-            };
+            let codec_label = s.as_ref().map(|s| get(s, "codec")).unwrap_or_default();
+            let note = [video.as_str(), codec_label, &format!("{mbps:.0} Mb/s")]
+                .into_iter()
+                .filter(|p| !p.is_empty())
+                .collect::<Vec<_>>()
+                .join(" · ");
             ui.set_quality_note(note.into());
+            match &s {
+                Some(s) => {
+                    let av1 = get(s, "av1") == "yes";
+                    let h264_only = get(s, "codec_setting") == "h264";
+                    ui.set_encoder_row(true);
+                    ui.set_encoder_note(get(s, "encoder").into());
+                    ui.set_av1(av1);
+                    ui.set_codec(i32::from(h264_only));
+                    let hint = if av1 && h264_only {
+                        "Plays everywhere. Your GPU also supports AV1 for about 40% smaller clips."
+                    } else if av1 {
+                        "Your GPU encodes AV1: clips are about 40% smaller at the same quality."
+                    } else if get(s, "encoder") == "Software" {
+                        "Recording on the CPU, so clips use H.264."
+                    } else {
+                        "Your GPU can't encode AV1, so clips use H.264."
+                    };
+                    ui.set_codec_hint(hint.into());
+                }
+                None => ui.set_encoder_row(false),
+            }
             let mic_on = s.as_ref().map_or(cfg.mic != AudioSource::None, |s| {
                 get(s, "mic_setting") != "none"
             });
@@ -1537,6 +1559,14 @@ pub fn library() -> Result<()> {
         if let Some(&q) = QUALITY.get(i as usize) {
             change("quality", move |c| c.quality = q);
         }
+    });
+    ui.on_set_codec(|i| {
+        let codec = if i == 0 {
+            CodecSetting::Auto
+        } else {
+            CodecSetting::H264
+        };
+        change("codec", move |c| c.codec = codec);
     });
     ui.on_set_duration(|i| {
         if let Some(&secs) = DURATIONS.get(i as usize) {

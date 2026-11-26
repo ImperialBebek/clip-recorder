@@ -12,6 +12,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 
+use crate::encoder::Codec;
 use crate::gst_util::{capsfilter, make};
 
 /// Seconds of every video keyframe, ascending. Only demuxes and parses —
@@ -21,7 +22,6 @@ pub fn keyframes(path: &Path) -> Result<Vec<f64>> {
     let pipeline = gst::Pipeline::with_name("keyframes");
     let src = make("filesrc", &[("location", path_str(path)?)])?;
     let demux = make("qtdemux", &[])?;
-    let parse = make("h264parse", &[])?;
     let times = Arc::new(Mutex::new(Vec::<f64>::new()));
     let sink = gst_app::AppSink::builder()
         .sync(false)
@@ -45,16 +45,28 @@ pub fn keyframes(path: &Path) -> Result<Vec<f64>> {
         )
         .build();
     let sink_el: gst::Element = sink.clone().upcast();
-    pipeline.add_many([&src, &demux, &parse, &sink_el])?;
+    pipeline.add_many([&src, &demux, &sink_el])?;
     src.link(&demux)?;
-    parse.link(&sink_el)?;
     demux.connect_pad_added({
-        let parse = parse.clone();
+        let sink_el = sink_el.clone();
         let pipeline = pipeline.downgrade();
         move |_, pad| {
+            let Some(pipeline) = pipeline.upgrade() else {
+                return;
+            };
             if pad.name().starts_with("video") {
-                let _ = pad.link(&parse.static_pad("sink").unwrap());
-            } else if let Some(pipeline) = pipeline.upgrade() {
+                let linked = (|| -> Result<()> {
+                    let parse = video_parser(pad)?;
+                    pipeline.add(&parse)?;
+                    parse.link(&sink_el)?;
+                    pad.link(&parse.static_pad("sink").unwrap())?;
+                    parse.sync_state_with_parent()?;
+                    Ok(())
+                })();
+                if let Err(e) = linked {
+                    eprintln!("keyframes: {e:#}");
+                }
+            } else {
                 drain_pad(&pipeline, pad);
             }
         }
@@ -232,6 +244,13 @@ fn wait_eos(bus: &gst::Bus, timeout_secs: u64) -> Result<()> {
     }
 }
 
+/// The parser matching the codec the demuxer found on `pad`.
+fn video_parser(pad: &gst::Pad) -> Result<gst::Element> {
+    let caps = pad.current_caps().context("video pad has no caps")?;
+    let codec = Codec::from_caps(&caps).context("unsupported video codec")?;
+    make(codec.parser(), &[])
+}
+
 /// Streams the demuxer emits that nobody needs still have to be consumed,
 /// or pushing on their unlinked pad stalls the whole demuxer.
 fn drain_pad(pipeline: &gst::Pipeline, pad: &gst::Pad) {
@@ -248,7 +267,7 @@ fn drain_pad(pipeline: &gst::Pipeline, pad: &gst::Pad) {
 /// own thread; without it the muxer's pad wait would block the demuxer.
 fn link_video(pipeline: &gst::Pipeline, pad: &gst::Pad, mux: &gst::Element) -> Result<()> {
     let queue = make("queue", &[])?;
-    let parse = make("h264parse", &[])?;
+    let parse = video_parser(pad)?;
     pipeline.add_many([&queue, &parse])?;
     queue.link(&parse)?;
     parse
