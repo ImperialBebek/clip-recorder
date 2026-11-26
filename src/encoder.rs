@@ -78,17 +78,21 @@ pub fn candidates(forced: Option<Encoder>) -> Vec<Encoder> {
     }
 }
 
-/// Encoder/codec pairs to try in order; AV1 comes before H.264 on each encoder.
+/// Encoder/codec pairs to try in order: AV1 on every encoder first, then H.264.
 pub fn attempts(
     encoders: &[Encoder],
     allow_av1: bool,
     supports: impl Fn(Encoder, Codec) -> bool,
 ) -> Vec<(Encoder, Codec)> {
     let mut out = Vec::new();
-    for &enc in encoders {
-        if allow_av1 && supports(enc, Codec::Av1) {
-            out.push((enc, Codec::Av1));
+    if allow_av1 {
+        for &enc in encoders {
+            if supports(enc, Codec::Av1) {
+                out.push((enc, Codec::Av1));
+            }
         }
+    }
+    for &enc in encoders {
         if supports(enc, Codec::H264) {
             out.push((enc, Codec::H264));
         }
@@ -147,7 +151,7 @@ impl Encoder {
             Codec::H264 => self.available(),
             Codec::Av1 => match self {
                 Encoder::Va => has("vaav1enc") || has("vaav1lpenc"),
-                Encoder::Nvenc => has("nvav1enc") && has("cudaupload") && has("cudaconvert"),
+                Encoder::Nvenc => has("nvav1enc"),
                 Encoder::Vaapi | Encoder::X264 => false,
             },
         }
@@ -281,20 +285,24 @@ impl Encoder {
                     )?,
                 ]
             }
-            Encoder::Nvenc => vec![
-                make("cudaupload", &[])?,
-                make("cudaconvert", &[])?,
-                make(
-                    "nvav1enc",
-                    &[
-                        ("rc-mode", "cbr"),
-                        ("bitrate", &kbps),
-                        ("gop-size", &gop),
-                        ("bframes", "0"),
-                        ("zerolatency", "true"),
-                    ],
-                )?,
-            ],
+            Encoder::Nvenc => {
+                let props: &[(&str, &str)] = &[
+                    ("rc-mode", "cbr"),
+                    ("bitrate", &kbps),
+                    ("gop-size", &gop),
+                    ("bframes", "0"),
+                    ("zerolatency", "true"),
+                ];
+                if has("cudaupload") && has("cudaconvert") {
+                    vec![
+                        make("cudaupload", &[])?,
+                        make("cudaconvert", &[])?,
+                        make("nvav1enc", props)?,
+                    ]
+                } else {
+                    vec![make("videoconvert", &[])?, make("nvav1enc", props)?]
+                }
+            }
             Encoder::Vaapi | Encoder::X264 => bail!("{} cannot encode AV1", self.label()),
         })
     }
@@ -391,5 +399,16 @@ mod tests {
             vec![(Encoder::X264, Codec::H264)]
         );
         assert!(attempts(&[], true, sup).is_empty());
+        // A hybrid PC where only NVIDIA encodes AV1 still prefers the NVIDIA
+        // AV1 over the iGPU's H.264.
+        let hybrid = |e: Encoder, c: Codec| c == Codec::H264 || e == Encoder::Nvenc;
+        assert_eq!(
+            attempts(&[Encoder::Va, Encoder::Nvenc], true, hybrid),
+            vec![
+                (Encoder::Nvenc, Codec::Av1),
+                (Encoder::Va, Codec::H264),
+                (Encoder::Nvenc, Codec::H264)
+            ]
+        );
     }
 }

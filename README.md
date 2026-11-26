@@ -207,7 +207,7 @@ Alt+S ─► snapshot ring ─► mp4mux ─► ~/Videos/Clips/*.mp4   (no re-en
 
 Tray and library talk to the recorder over `$XDG_RUNTIME_DIR/clip-recorder.sock` (one command per connection: `save`, `status`, `pause`, `resume`, `reload`, `reselect`, `quit`, ...). Everything OS-specific (portal capture, audio sources, hotkey, tray, socket) lives in `src/platform/linux/`; the ring buffer, encoder selection, muxing and UI are portable, so a Windows port adds `src/platform/windows/` (WGC capture, WASAPI loopback, Media Foundation/NVENC/AMF/QSV encoders, `RegisterHotKey`, a named pipe) without touching the rest.
 
-The encoder emits a keyframe every second, and the buffer drops whole GOPs from the front, so a saved clip always starts on a keyframe and is at most one second longer than `--duration`. Encoders are tried in the order va, vaapi, nvenc, x264, AV1 before H.264 on each when `codec = auto`; the first that produces a frame wins, and `--encoder` forces one.
+The encoder emits a keyframe every second, and the buffer drops whole GOPs from the front, so a saved clip always starts on a keyframe and is at most one second longer than `--duration`. Encoders are tried in the order va, vaapi, nvenc, x264, AV1 on every encoder (in that order) before falling back to H.264 when `codec = auto`; the first that produces a frame wins, and `--encoder` forces one.
 
 ## Troubleshooting
 
