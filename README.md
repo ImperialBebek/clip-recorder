@@ -1,12 +1,12 @@
 # clip-recorder
 
-Ultra-lightweight game clip recorder for Linux. It keeps the last N seconds of your screen and audio in RAM as already-encoded H.264, and writes them to an MP4 when you press **Alt+S**. Nothing touches the disk until you save, and saving never re-encodes.
+Ultra-lightweight game clip recorder for Linux. It keeps the last N seconds of your screen and audio in RAM as already-encoded video (AV1 where the GPU can encode it, else H.264), and writes them to an MP4 when you press **Alt+S**. Nothing touches the disk until you save, and saving never re-encodes.
 
 - Screen capture through the xdg-desktop-portal ScreenCast API and PipeWire, so it works on Wayland (GNOME, KDE, Hyprland, Sway, ...) and on X11 with a portal backend.
-- Hardware encoding through VA-API (Intel/AMD) or NVENC (NVIDIA), with frames kept on the GPU. Falls back to x264 with a warning if no hardware encoder works.
+- Hardware encoding through VA-API (Intel/AMD) or NVENC (NVIDIA), with frames kept on the GPU. Records AV1 on GPUs that can encode it (AMD RX 7000+, Intel Arc or Meteor Lake+, NVIDIA RTX 40+; `nvav1enc` needs GStreamer 1.26+), clips about 40% smaller at the same quality, and H.264 otherwise. Falls back to x264 with a warning if no hardware encoder works.
 - Per-app audio tracks: PipeWire's `pw-dump` reports which applications play audio, and each category is captured to its own MP4 track — **Game** (only the game, never the desktop mix), **Voice** (Discord, TeamSpeak, Mumble and friends) and **Other** (browser, music, everything else). Defaults: Game, Voice and your microphone on, Other off. Toggle each in the library's popover and mix them independently in the built-in player. To record the whole desktop mix as a single track instead, use `--audio pipewire` (or `--audio pulse`).
 - Alt+S registered through the GlobalShortcuts portal (KDE, GNOME 48+, Hyprland); on other compositors it reads `/dev/input` instead, which works in fullscreen games and still lets the game see the key.
-- Tray icon (Save clip, Open library, Quit), a clips library window with Quality and Duration in a header popover built with Slint, and a toast after each save. The toast is a layer-shell overlay (KDE, Hyprland, Sway, ...): it sits above fullscreen games, never takes focus and ignores clicks; on compositors without layer-shell (GNOME) it becomes a desktop notification. The windows are separate short-lived processes, so the recorder itself stays small. Thumbnails need an H.264 decoder (gst-libav or a VA-API decoder).
+- Tray icon (Save clip, Open library, Quit), a clips library window with Quality and Duration in a header popover built with Slint, and a toast after each save. The toast is a layer-shell overlay (KDE, Hyprland, Sway, ...): it sits above fullscreen games, never takes focus and ignores clicks; on compositors without layer-shell (GNOME) it becomes a desktop notification. The windows are separate short-lived processes, so the recorder itself stays small. Thumbnails need an H.264 or AV1 decoder (gst-libav, dav1d or a VA-API decoder).
 
 ## Install
 
@@ -145,13 +145,14 @@ clip-recorder quit              stop the running recorder
 
 ### Settings
 
-The library's popover sets Quality (Light/High/Max), Duration (30/60/120 s), the App audio tracks (Game / Voice chat / Other apps) and the Microphone (Off / System default / a specific device); encoder and folder are picked automatically. Both live in `~/.config/clip-recorder/config`, which the running recorder applies at once: buffer length on the next keyframe, encoder, quality, frame rate and audio by restarting the encoder (the buffer starts over). Command-line options override the file for that run. The file is plain `key = value`:
+The library's popover sets Quality (Light/High/Max), Duration (30/60/120 s), the App audio tracks (Game / Voice chat / Other apps) and the Microphone (Off / System default / a specific device); the encoder is picked automatically, with an AV1 / H.264 switch when the GPU supports AV1, and so is the folder. Both live in `~/.config/clip-recorder/config`, which the running recorder applies at once: buffer length on the next keyframe, encoder, quality, frame rate and audio by restarting the encoder (the buffer starts over). Command-line options override the file for that run. The file is plain `key = value`:
 
 ```
 duration = 60
 fps = 60
 quality = high            # light 8 Mb/s, high 12 Mb/s, max 20 Mb/s
 encoder = auto
+codec = auto              # auto = AV1 when the GPU can encode it (bitrate 60% of the preset), h264 = always H.264
 audio = auto            # auto: per-app tracks; pipewire/pulse: whole desktop, one track; none
 track_game = true       # Game track: only the game's audio
 track_voice = true      # Voice track: Discord, TeamSpeak, Mumble, Zoom, …
@@ -198,7 +199,7 @@ systemctl --user enable --now clip-recorder
 ## How it works
 
 ```
-portal ScreenCast ─► pipewiresrc ─► videorate (fps cap) ─► GPU convert ─► H.264 encoder ─► ring buffer (RAM)
+portal ScreenCast ─► pipewiresrc ─► videorate (fps cap) ─► GPU convert ─► video encoder ─► ring buffer (RAM)
 pw-dump (which apps play audio) ─► pipewiresrc per app ─► audiomixer per category ─► AAC/Opus encoder ─► ring buffer (RAM)
 pipewiresrc (microphone) ─► AAC/Opus encoder ─────────────────────────────────────────────► ring buffer (RAM)
 Alt+S ─► snapshot ring ─► mp4mux ─► ~/Videos/Clips/*.mp4   (no re-encode, capture keeps running)
@@ -206,12 +207,12 @@ Alt+S ─► snapshot ring ─► mp4mux ─► ~/Videos/Clips/*.mp4   (no re-en
 
 Tray and library talk to the recorder over `$XDG_RUNTIME_DIR/clip-recorder.sock` (one command per connection: `save`, `status`, `pause`, `resume`, `reload`, `reselect`, `quit`, ...). Everything OS-specific (portal capture, audio sources, hotkey, tray, socket) lives in `src/platform/linux/`; the ring buffer, encoder selection, muxing and UI are portable, so a Windows port adds `src/platform/windows/` (WGC capture, WASAPI loopback, Media Foundation/NVENC/AMF/QSV encoders, `RegisterHotKey`, a named pipe) without touching the rest.
 
-The encoder emits a keyframe every second, and the buffer drops whole GOPs from the front, so a saved clip always starts on a keyframe and is at most one second longer than `--duration`. Encoders are tried in the order va, vaapi, nvenc, x264; the first that produces a frame wins, and `--encoder` forces one.
+The encoder emits a keyframe every second, and the buffer drops whole GOPs from the front, so a saved clip always starts on a keyframe and is at most one second longer than `--duration`. Encoders are tried in the order va, vaapi, nvenc, x264, AV1 before H.264 on each when `codec = auto`; the first that produces a frame wins, and `--encoder` forces one.
 
 ## Troubleshooting
 
 - `ScreenCast portal not available`: install the portal backend for your desktop and make sure `xdg-desktop-portal` is running in your session.
-- `encoder va: ...` then falls back to x264: check `gst-inspect-1.0 vah264enc` (Intel/AMD) or `gst-inspect-1.0 nvh264enc` (NVIDIA). Run with `GST_DEBUG=3` for details.
+- `encoder va: ...` then falls back to x264: check `gst-inspect-1.0 vah264enc` or `vaav1enc` (Intel/AMD) or `gst-inspect-1.0 nvh264enc` (NVIDIA). Run with `GST_DEBUG=3` for details.
 - No audio: per-app capture needs PipeWire's `pw-dump` tool; without it the recorder falls back to the desktop mix. `--audio pulse` records the default output through pipewire-pulse as one track.
 - No microphone track: `clip-recorder status | grep mic` shows what was picked up; try `--mic pulse`, or `--mic none` to silence the "microphone unavailable" warning.
 - Alt+S does nothing: `clip-recorder status | grep hotkey_backend` says which path is in use. `none` means neither the portal nor `/dev/input` was available; see [Hotkey](#hotkey).

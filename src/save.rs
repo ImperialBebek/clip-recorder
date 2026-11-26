@@ -5,6 +5,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 
+use crate::encoder::Codec;
 use crate::gst_util::{add_chain, make};
 use crate::ring::{Snapshot, Track};
 
@@ -31,8 +32,12 @@ pub fn write_mp4(snap: Snapshot, path: &Path) -> Result<gst::ClockTime> {
     mux.link(&sink)?;
 
     let vsrc = appsrc(&vcaps);
-    add_chain(&pipeline, &[vsrc.clone().upcast(), make("h264parse", &[])?])?;
-    link_last(&pipeline, "h264parse", &mux)?;
+    let codec = Codec::from_caps(&vcaps).context("unsupported video codec")?;
+    add_chain(
+        &pipeline,
+        &[vsrc.clone().upcast(), make(codec.parser(), &[])?],
+    )?;
+    link_last(&pipeline, codec.parser(), &mux)?;
 
     // Each enabled audio source becomes its own MP4 track, titled so the
     // built-in player can label its lanes.

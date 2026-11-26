@@ -66,12 +66,36 @@ impl Capture {
     }
 }
 
+/// Video codec setting: AV1 when the GPU can encode it, or H.264 only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodecSetting {
+    Auto,
+    H264,
+}
+
+impl CodecSetting {
+    pub fn name(self) -> &'static str {
+        match self {
+            CodecSetting::Auto => "auto",
+            CodecSetting::H264 => "h264",
+        }
+    }
+    fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "auto" | "av1" => CodecSetting::Auto,
+            "h264" => CodecSetting::H264,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     pub duration: u32,
     pub fps: u32,
     pub quality: Quality,
     pub encoder: Option<Encoder>,
+    pub codec: CodecSetting,
     pub audio: AudioSource,
     /// Microphone, saved as a second audio track.
     pub mic: AudioSource,
@@ -99,6 +123,7 @@ impl Default for Config {
             fps: 60,
             quality: Quality::High,
             encoder: None,
+            codec: CodecSetting::Auto,
             audio: AudioSource::Auto,
             mic: AudioSource::Auto,
             mic_device: String::new(),
@@ -154,6 +179,7 @@ impl Config {
                 "fps" => c.fps = v.parse().unwrap_or(c.fps).max(1),
                 "quality" => c.quality = Quality::parse(v).unwrap_or(c.quality),
                 "encoder" => c.encoder = Encoder::parse(v).unwrap_or(c.encoder),
+                "codec" => c.codec = CodecSetting::parse(v).unwrap_or(c.codec),
                 "audio" => c.audio = AudioSource::parse(v).unwrap_or(c.audio),
                 "mic" => c.mic = AudioSource::parse(v).unwrap_or(c.mic),
                 "mic_device" => c.mic_device = v.to_owned(),
@@ -179,11 +205,12 @@ impl Config {
         let p = path();
         std::fs::create_dir_all(p.parent().unwrap())?;
         let text = format!(
-            "duration = {}\nfps = {}\nquality = {}\nencoder = {}\naudio = {}\nmic = {}\nmic_device = {}\ntrack_game = {}\ntrack_voice = {}\ntrack_other = {}\ncapture = {}\noutput = {}\nhotkey = {}\npause_without_game = {}\ntoast = {}\nsound = {}\ncheck_updates = {}\n",
+            "duration = {}\nfps = {}\nquality = {}\nencoder = {}\ncodec = {}\naudio = {}\nmic = {}\nmic_device = {}\ntrack_game = {}\ntrack_voice = {}\ntrack_other = {}\ncapture = {}\noutput = {}\nhotkey = {}\npause_without_game = {}\ntoast = {}\nsound = {}\ncheck_updates = {}\n",
             self.duration,
             self.fps,
             self.quality.name(),
             self.encoder.map_or("auto", |e| e.name()),
+            self.codec.name(),
             self.audio.name(),
             self.mic.name(),
             self.mic_device,
@@ -221,6 +248,7 @@ impl Config {
             fps,
             quality,
             encoder,
+            codec,
             audio,
             mic,
             mic_device,
@@ -261,5 +289,14 @@ mod tests {
         for q in [Quality::Light, Quality::High, Quality::Max] {
             assert_eq!(Quality::parse(q.name()), Some(q));
         }
+    }
+
+    #[test]
+    fn codec_round_trips() {
+        for c in [CodecSetting::Auto, CodecSetting::H264] {
+            assert_eq!(CodecSetting::parse(c.name()), Some(c));
+        }
+        assert_eq!(CodecSetting::parse("av1"), Some(CodecSetting::Auto));
+        assert_eq!(CodecSetting::parse("x"), None);
     }
 }
